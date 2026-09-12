@@ -1,0 +1,3347 @@
+diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
+index d4d6b9409..1056b2485 100644
+--- a/apps/server/src/orchestration/Layers/CheckpointReactor.ts
++++ b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
+@@ -1,3 +1,4 @@
++import { sharedCodexSocket } from "../../provider/sharedCodex.ts";
+ import {
+   CommandId,
+   type CheckpointRef,
+@@ -911,7 +912,34 @@ const make = Effect.gen(function* () {
+     CheckpointStoreError | OrchestrationDispatchError | PlatformError.PlatformError,
+     never
+   > =>
+-    input.source === "domain" ? processDomainEvent(input.event) : processRuntimeEvent(input.event);
++    Effect.gen(function* () {
++      if (
++        input.source === "runtime" &&
++        sharedCodexSocket(input.event.providerInstanceId ?? input.event.provider)
++      )
++        return;
++      if (
++        input.source === "domain" &&
++        input.event.aggregateKind === "thread" &&
++        process.env.T3_CODEX_SHARED_SOCKET
++      ) {
++        const thread = yield* resolveThreadDetail(ThreadId.make(input.event.aggregateId));
++        if (thread && sharedCodexSocket(thread.modelSelection.instanceId)) {
++          if (input.event.type === "thread.checkpoint-revert-requested") {
++            yield* appendRevertFailureActivity({
++              threadId: thread.id,
++              turnCount: input.event.payload.turnCount,
++              detail: "Checkpoint rollback is unavailable for shared Codex conversations.",
++              createdAt: input.event.occurredAt,
++            });
++          }
++          return;
++        }
++      }
++      yield* input.source === "domain"
++        ? processDomainEvent(input.event)
++        : processRuntimeEvent(input.event);
++    });
+ 
+   const processInputSafely = (input: ReactorInput) =>
+     processInput(input).pipe(
+diff --git a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
+index 0b2e08c40..bf4c96c7a 100644
+--- a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
++++ b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
+@@ -115,6 +115,126 @@ const hasMetricSnapshot = (
+   );
+ 
+ describe("OrchestrationEngine", () => {
++  it("deduplicates observed client echoes after restarting with a compact command snapshot", async () => {
++    const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-observe-restart-"));
++    const databasePath = NodePath.join(dir, "state.sqlite");
++    let system = await createOrchestrationSystem(databasePath);
++    const threadId = ThreadId.make("restart-observation");
++    const projectId = ProjectId.make("restart-project");
++    try {
++      await system.run(
++        system.engine.dispatch({
++          type: "project.create",
++          commandId: CommandId.make("project"),
++          projectId,
++          title: "Shared",
++          workspaceRoot: "/tmp/shared",
++          createdAt: now(),
++        }),
++      );
++      await system.run(
++        system.engine.dispatch({
++          type: "thread.create",
++          commandId: CommandId.make("thread"),
++          threadId,
++          projectId,
++          title: "Shared",
++          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
++          runtimeMode: "approval-required",
++          interactionMode: "default",
++          branch: null,
++          worktreePath: null,
++          createdAt: now(),
++        }),
++      );
++      const message = {
++        type: "thread.message.observe" as const,
++        commandId: CommandId.make("original"),
++        threadId,
++        messageId: MessageId.make("original-client-id"),
++        turnId: TurnId.make("turn"),
++        role: "user" as const,
++        text: "Shared prompt",
++        createdAt: now(),
++      };
++      const accepted = await system.run(system.engine.dispatch(message));
++      await system.dispose();
++      system = await createOrchestrationSystem(databasePath);
++      expect(
++        await system.run(
++          system.engine.dispatch({
++            ...message,
++            commandId: CommandId.make("replayed"),
++            messageId: MessageId.make("native-item-id"),
++            clientMessageId: message.messageId,
++          }),
++        ),
++      ).toEqual(accepted);
++      expect(
++        Option.getOrThrow(await system.readThread(threadId)).messages.map((item) => item.id),
++      ).toEqual([message.messageId]);
++    } finally {
++      await system.dispose();
++      await NodeFSP.rm(dir, { recursive: true, force: true });
++    }
++  });
++
++  effectIt.effect("accepts repeated native observations without advancing the event sequence", () =>
++    Effect.gen(function* () {
++      const engine = yield* OrchestrationEngineService;
++      const snapshots = yield* ProjectionSnapshotQuery;
++      const projectId = ProjectId.make("shared-project");
++      const threadId = ThreadId.make("shared-thread");
++      yield* engine.dispatch({
++        type: "project.create",
++        commandId: CommandId.make("shared-project"),
++        projectId,
++        title: "Shared",
++        workspaceRoot: "/tmp/shared",
++        createdAt: now(),
++      });
++      yield* engine.dispatch({
++        type: "thread.create",
++        commandId: CommandId.make("shared-thread"),
++        threadId,
++        projectId,
++        title: "Shared",
++        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
++        runtimeMode: "approval-required",
++        interactionMode: "default",
++        branch: null,
++        worktreePath: null,
++        createdAt: now(),
++      });
++      const observation = {
++        type: "thread.message.observe" as const,
++        commandId: CommandId.make("observe-first"),
++        threadId,
++        messageId: MessageId.make("native-user-1"),
++        turnId: TurnId.make("native-turn-1"),
++        role: "user" as const,
++        text: "From Ghostty",
++        createdAt: now(),
++      };
++      const first = yield* engine.dispatch(observation);
++      const duplicate = { ...observation, commandId: CommandId.make("observe-again") };
++      expect(yield* engine.dispatch(duplicate)).toEqual(first);
++      expect(yield* engine.dispatch(duplicate)).toEqual(first);
++      expect(
++        yield* engine.dispatch({
++          ...observation,
++          commandId: CommandId.make("observe-echo"),
++          messageId: MessageId.make("different-item"),
++          clientMessageId: observation.messageId,
++        }),
++      ).toEqual(first);
++      const detail = yield* snapshots.getThreadDetailById(threadId);
++      expect(Option.getOrThrow(detail).messages.map((message) => message.text)).toEqual([
++        "From Ghostty",
++      ]);
++    }).pipe(Effect.provide(makeOrchestrationLayer())),
++  );
++
+   it.each(["running", "stopped"] as const)(
+     "sends async answers with a %s session and rejects old duplicate replies",
+     async (status) => {
+diff --git a/apps/server/src/orchestration/Layers/OrchestrationEngine.ts b/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
+index 6557888c3..5c2581fb5 100644
+--- a/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
++++ b/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
+@@ -2,6 +2,7 @@ import type {
+   OrchestrationClientOrigin,
+   OrchestrationEvent,
+   OrchestrationReadModel,
++  OrchestrationMessage,
+   ProjectId,
+   ThreadId,
+ } from "@t3tools/contracts";
+@@ -219,9 +220,22 @@ const makeOrchestrationEngine = Effect.gen(function* () {
+           envelope.command.type === "thread.user-input.dismiss"
+             ? yield* projectionSnapshotQuery.getUserInputActivity(envelope.command)
+             : Option.none();
++        let observedMessage = Option.none<OrchestrationMessage>();
++        if (envelope.command.type === "thread.message.observe") {
++          const command = envelope.command;
++          let stored = yield* projectionSnapshotQuery.getTurnStartMessage(command);
++          if (Option.isNone(stored) && command.role === "user" && command.clientMessageId) {
++            stored = yield* projectionSnapshotQuery.getTurnStartMessage({
++              threadId: command.threadId,
++              messageId: command.clientMessageId,
++            });
++          }
++          observedMessage = Option.map(stored, (value) => value.message);
++        }
+         const eventBase = yield* decideOrchestrationCommand({
+           command: envelope.command,
+           readModel: commandReadModel,
++          ...(Option.isSome(observedMessage) ? { observedMessage: observedMessage.value } : {}),
+           ...(Option.isSome(userInputActivity)
+             ? { userInputActivity: userInputActivity.value }
+             : {}),
+@@ -263,7 +277,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
+               }
+ 
+               const lastSavedEvent = committedEvents.at(-1) ?? null;
+-              if (lastSavedEvent === null) {
++              if (lastSavedEvent === null && envelope.command.type !== "thread.message.observe") {
+                 return yield* new OrchestrationCommandInvariantError({
+                   commandType: envelope.command.type,
+                   detail: "Command produced no events.",
+@@ -272,10 +286,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
+ 
+               yield* commandReceiptRepository.upsert({
+                 commandId: envelope.command.commandId,
+-                aggregateKind: lastSavedEvent.aggregateKind,
+-                aggregateId: lastSavedEvent.aggregateId,
+-                acceptedAt: lastSavedEvent.occurredAt,
+-                resultSequence: lastSavedEvent.sequence,
++                aggregateKind: lastSavedEvent?.aggregateKind ?? aggregateRef.aggregateKind,
++                aggregateId: lastSavedEvent?.aggregateId ?? aggregateRef.aggregateId,
++                acceptedAt: lastSavedEvent?.occurredAt ?? (yield* nowIso),
++                resultSequence: lastSavedEvent?.sequence ?? commandReadModel.snapshotSequence,
+                 status: "accepted",
+                 error: null,
+               });
+@@ -283,7 +297,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
+               return {
+                 committedEvents,
+                 attachmentCleanups,
+-                lastSequence: lastSavedEvent.sequence,
++                lastSequence: lastSavedEvent?.sequence ?? commandReadModel.snapshotSequence,
+                 nextCommandReadModel,
+               } as const;
+             }),
+diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
+index 5c1086b9e..188c2037c 100644
+--- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
++++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
+@@ -1441,7 +1441,7 @@ const make = Effect.gen(function* () {
+     }
+ 
+     yield* providerService
+-      .sendTurn(sendTurnRequest.value)
++      .sendTurn({ ...sendTurnRequest.value, clientUserMessageId: event.payload.messageId })
+       .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+   });
+ 
+diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
+index 8d34fee4f..5332fa021 100644
+--- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
++++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
+@@ -26,6 +26,7 @@ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+ import * as Predicate from "effect/Predicate";
++import * as Schema from "effect/Schema";
+ import * as Stream from "effect/Stream";
+ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+ import { formatTokens } from "@t3tools/shared/usageFormat";
+@@ -52,6 +53,13 @@ import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
+ import { forkParked } from "../../serverActivation.ts";
+ import { ServerSettingsService } from "../../serverSettings.ts";
+ import { canReplaceThreadTitle } from "../threadTitles.ts";
++import { sharedCodexSocket } from "../../provider/sharedCodex.ts";
++
++const decodeNativeUserIdentity = Schema.decodeUnknownOption(
++  Schema.Struct({
++    item: Schema.Struct({ clientId: Schema.optionalKey(Schema.NullOr(Schema.String)) }),
++  }),
++);
+ 
+ const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
+ const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
+@@ -1483,6 +1491,31 @@ const make = Effect.gen(function* () {
+       const thread = yield* resolveThreadRuntimeContext(event.threadId);
+       if (!thread) return;
+ 
++      const shared = sharedCodexSocket(event.providerInstanceId ?? event.provider) !== undefined;
++      if (
++        shared &&
++        (event.type === "item.started" || event.type === "item.completed") &&
++        event.payload.itemType === "user_message" &&
++        event.itemId &&
++        event.turnId &&
++        event.payload.detail
++      ) {
++        const identity = Option.getOrUndefined(decodeNativeUserIdentity(event.payload.data));
++        yield* orchestrationEngine.dispatch({
++          type: "thread.message.observe",
++          commandId: CommandId.make(`native-user:${event.eventId}`),
++          threadId: thread.id,
++          messageId: MessageId.make(`native-user:${thread.id}:${event.itemId}`),
++          ...(identity?.item.clientId
++            ? { clientMessageId: MessageId.make(identity.item.clientId) }
++            : {}),
++          turnId: TurnId.make(event.turnId),
++          role: "user",
++          text: event.payload.detail,
++          createdAt: event.createdAt,
++        });
++      }
++
+       const now = event.createdAt;
+       const eventTurnId = toTurnId(event.turnId);
+       const activeTurnId = thread.session?.activeTurnId ?? null;
+@@ -1517,7 +1550,7 @@ const make = Effect.gen(function* () {
+       const conflictingTurnStartIsPendingTurnStart =
+         event.type === "turn.started" && conflictsWithActiveTurn
+           ? sameId(yield* getExpectedProviderTurnIdForThread(thread.id), eventTurnId) &&
+-            Option.isSome(pendingTurnStart)
++            (shared || Option.isSome(pendingTurnStart))
+           : false;
+ 
+       const shouldApplyThreadLifecycle = (() => {
+diff --git a/apps/server/src/orchestration/decider.observe.test.ts b/apps/server/src/orchestration/decider.observe.test.ts
+new file mode 100644
+index 000000000..bb2f26a69
+--- /dev/null
++++ b/apps/server/src/orchestration/decider.observe.test.ts
+@@ -0,0 +1,78 @@
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import { expect, it } from "@effect/vitest";
++import {
++  CommandId,
++  EventId,
++  MessageId,
++  ProjectId,
++  ProviderInstanceId,
++  ThreadId,
++  TurnId,
++  type OrchestrationEvent,
++} from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++
++import { decideOrchestrationCommand } from "./decider.ts";
++import { createEmptyReadModel, projectEvent } from "./projector.ts";
++
++it.layer(NodeServices.layer)("observed native messages", (it) => {
++  it.effect("projects external prompts once and deduplicates echoes using client identity", () =>
++    Effect.gen(function* () {
++      const createdAt = "2026-09-09T12:00:00.000Z";
++      const threadId = ThreadId.make("shared-thread");
++      let model = yield* projectEvent(createEmptyReadModel(createdAt), {
++        sequence: 1,
++        eventId: EventId.make("created"),
++        aggregateKind: "thread",
++        aggregateId: threadId,
++        type: "thread.created",
++        occurredAt: createdAt,
++        commandId: CommandId.make("create"),
++        causationEventId: null,
++        correlationId: CommandId.make("create"),
++        metadata: {},
++        payload: {
++          threadId,
++          projectId: ProjectId.make("project"),
++          title: "Shared",
++          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
++          runtimeMode: "approval-required",
++          interactionMode: "default",
++          branch: null,
++          worktreePath: null,
++          createdAt,
++          updatedAt: createdAt,
++        },
++      });
++      const command = {
++        type: "thread.message.observe" as const,
++        commandId: CommandId.make("observe"),
++        threadId,
++        messageId: MessageId.make("native-user:1"),
++        turnId: TurnId.make("turn-1"),
++        role: "user" as const,
++        text: "From Ghostty",
++        createdAt,
++      };
++      const first = yield* decideOrchestrationCommand({ command, readModel: model });
++      expect(first).toMatchObject({
++        type: "thread.message-sent",
++        payload: { text: "From Ghostty", turnId: "turn-1", streaming: false },
++      });
++      model = yield* projectEvent(model, { ...first, sequence: 2 } as OrchestrationEvent);
++      expect(yield* decideOrchestrationCommand({ command, readModel: model })).toEqual([]);
++      expect(
++        yield* decideOrchestrationCommand({
++          command: {
++            ...command,
++            messageId: MessageId.make("different-native-item"),
++            clientMessageId: command.messageId,
++            text: "A provider-expanded version of the original prompt",
++          },
++          readModel: model,
++        }),
++      ).toEqual([]);
++      expect(model.threads[0]?.messages.map((message) => message.text)).toEqual(["From Ghostty"]);
++    }),
++  );
++});
+diff --git a/apps/server/src/orchestration/decider.ts b/apps/server/src/orchestration/decider.ts
+index b93add311..fb904f1ad 100644
+--- a/apps/server/src/orchestration/decider.ts
++++ b/apps/server/src/orchestration/decider.ts
+@@ -9,6 +9,7 @@ import {
+   type OrchestrationCommand,
+   type OrchestrationEvent,
+   type OrchestrationReadModel,
++  type OrchestrationMessage,
+   type OrchestrationThread,
+   type OrchestrationThreadActivity,
+ } from "@t3tools/contracts";
+@@ -195,10 +196,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
+   command,
+   readModel,
+   userInputActivity,
++  observedMessage,
+ }: {
+   readonly command: OrchestrationCommand;
+   readonly readModel: OrchestrationReadModel;
+   readonly userInputActivity?: OrchestrationThreadActivity;
++  readonly observedMessage?: OrchestrationMessage;
+ }): Effect.fn.Return<
+   DecideOrchestrationCommandResult,
+   OrchestrationCommandRejection | PlatformError.PlatformError,
+@@ -1532,6 +1535,44 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
+       };
+     }
+ 
++    case "thread.message.observe": {
++      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
++      if (thread.deletedAt !== null || thread.archivedAt !== null) return [];
++      const existing =
++        observedMessage ??
++        thread.messages.find(
++          (message) =>
++            message.id === command.messageId ||
++            (command.role === "user" &&
++              command.clientMessageId !== undefined &&
++              message.id === command.clientMessageId),
++        );
++      if (
++        existing &&
++        (command.role === "user" || (!existing.streaming && existing.text === command.text))
++      )
++        return [];
++      return {
++        ...(yield* withEventBase({
++          aggregateKind: "thread",
++          aggregateId: command.threadId,
++          occurredAt: command.createdAt,
++          commandId: command.commandId,
++          metadata: { providerTurnId: command.turnId },
++        })),
++        type: "thread.message-sent",
++        payload: {
++          threadId: command.threadId,
++          messageId: command.messageId,
++          role: command.role,
++          text: command.text,
++          turnId: command.turnId,
++          streaming: false,
++          createdAt: existing?.createdAt ?? command.createdAt,
++          updatedAt: command.createdAt,
++        },
++      };
++    }
+     case "thread.history.import": {
+       const thread = yield* requireThread({
+         readModel,
+diff --git a/apps/server/src/provider/Layers/CodexAdapter.ts b/apps/server/src/provider/Layers/CodexAdapter.ts
+index 5e2244336..aa70f826b 100644
+--- a/apps/server/src/provider/Layers/CodexAdapter.ts
++++ b/apps/server/src/provider/Layers/CodexAdapter.ts
+@@ -764,6 +764,9 @@ function itemTitle(
+ }
+ 
+ function itemDetail(itemType: CanonicalItemType, item: CodexLifecycleItem): string | undefined {
++  if (item.type === "userMessage") {
++    return item.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
++  }
+   const itemRecord = item as Record<string, unknown>;
+   const action = itemRecord.action as Record<string, unknown> | undefined;
+   const actionQueries = Array.isArray(action?.queries) ? action.queries : [];
+@@ -2255,6 +2258,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+           providerInstanceId: boundInstanceId,
+           cwd: input.cwd ?? process.cwd(),
+           binaryPath: codexConfig.binaryPath,
++          ...(boundInstanceId === "codex" && process.env.T3_CODEX_SHARED_SOCKET
++            ? { sharedSocketPath: process.env.T3_CODEX_SHARED_SOCKET }
++            : {}),
+           launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
+           ...(options?.environment ? { environment: options.environment } : {}),
+           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
+@@ -2467,6 +2473,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+         : undefined;
+     return yield* session.runtime
+       .sendTurn({
++        ...(input.clientUserMessageId ? { clientUserMessageId: input.clientUserMessageId } : {}),
+         ...(input.input !== undefined ? { input: input.input } : {}),
+         ...(input.modelSelection?.instanceId === boundInstanceId
+           ? { model: input.modelSelection.model }
+@@ -2652,7 +2659,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
+     provider: PROVIDER,
+     capabilities: {
+       sessionModelSwitch: "in-session",
+-      promptlessTurnContinuation: true,
++      promptlessTurnContinuation: !(
++        boundInstanceId === "codex" && process.env.T3_CODEX_SHARED_SOCKET
++      ),
++      supportsConversationRollback: !(
++        boundInstanceId === "codex" && process.env.T3_CODEX_SHARED_SOCKET
++      ),
+     },
+     startSession,
+     sendTurn,
+diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
+index 3385137a2..491efda5f 100644
+--- a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
++++ b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
+@@ -63,6 +63,23 @@ function makeThreadOpenResponse(
+ }
+ 
+ describe("buildTurnStartParams", () => {
++  it("inherits native settings for shared turns", () => {
++    const params = Effect.runSync(
++      buildTurnStartParams({
++        threadId: "native",
++        runtimeMode: "full-access",
++        prompt: "hello",
++        model: "t3-default",
++        effort: "high",
++        interactionMode: "default",
++        preserveNativeSettings: true,
++      }),
++    );
++    NodeAssert.deepStrictEqual(params, {
++      threadId: "native",
++      input: [{ type: "text", text: "hello" }],
++    });
++  });
+   it("keeps invalid turn values only in the schema cause", () => {
+     const secret = "codex-turn-input-secret-sentinel";
+     const error = Effect.runSync(
+@@ -220,30 +237,30 @@ describe("buildTurnStartParams", () => {
+     }),
+   );
+ 
+-  it("omits collaboration mode when interaction mode is absent", () => {
+-    const params = Effect.runSync(
+-      buildTurnStartParams({
++  it.effect("omits collaboration mode when interaction mode is absent", () =>
++    Effect.gen(function* () {
++      const params = yield* buildTurnStartParams({
+         threadId: "provider-thread-1",
+         runtimeMode: "approval-required",
+         prompt: "Review",
+-      }),
+-    );
++      });
+ 
+-    NodeAssert.deepStrictEqual(params, {
+-      threadId: "provider-thread-1",
+-      approvalPolicy: "untrusted",
+-      approvalsReviewer: "user",
+-      sandboxPolicy: {
+-        type: "readOnly",
+-      },
+-      input: [
+-        {
+-          type: "text",
+-          text: "Review",
++      NodeAssert.deepStrictEqual(params, {
++        threadId: "provider-thread-1",
++        approvalPolicy: "untrusted",
++        approvalsReviewer: "user",
++        sandboxPolicy: {
++          type: "readOnly",
+         },
+-      ],
+-    });
+-  });
++        input: [
++          {
++            type: "text",
++            text: "Review",
++          },
++        ],
++      });
++    }),
++  );
+ });
+ 
+ describe("Codex MCP elicitation approvals", () => {
+@@ -781,6 +798,44 @@ describe("isRecoverableThreadResumeError", () => {
+ });
+ 
+ describe("openCodexThread", () => {
++  it.effect("attaches without replacing native settings or falling back to a new thread", () =>
++    Effect.gen(function* () {
++      const calls: unknown[] = [];
++      let fail = false;
++      const input = {
++        client: {
++          request: () => Effect.die("Shared attach must never start a thread"),
++          raw: {
++            request: (method: string, payload: unknown) => {
++              calls.push({ method, payload });
++              return fail
++                ? Effect.fail(
++                    CodexErrors.CodexAppServerRequestError.invalidRequest(
++                      "no rollout found for thread id native",
++                    ),
++                  )
++                : Effect.succeed(makeThreadOpenResponse("native"));
++            },
++          },
++        },
++        threadId: ThreadId.make("local"),
++        runtimeMode: "full-access" as const,
++        cwd: "/wrong-directory",
++        requestedModel: "wrong-model",
++        serviceTier: undefined,
++        resumeThreadId: "native",
++        shared: true,
++      };
++      const opened = yield* openCodexThread(input);
++      NodeAssert.equal(opened.cwd, "/tmp/project");
++      NodeAssert.deepStrictEqual(calls, [
++        { method: "thread/resume", payload: { threadId: "native", excludeTurns: true } },
++      ]);
++      fail = true;
++      const error = yield* openCodexThread(input).pipe(Effect.flip);
++      NodeAssert.match(error.message, /no rollout found/);
++    }),
++  );
+   it.effect("resumes metadata when historical turns contain unknown error values", () =>
+     Effect.gen(function* () {
+       const response = makeThreadOpenResponse("saved-thread");
+diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
+index 4ee5845e3..180c88282 100644
+--- a/apps/server/src/provider/Layers/CodexSessionRuntime.ts
++++ b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
+@@ -1,3 +1,4 @@
++import { unsharedThreads } from "../sharedCodexRegistration.ts";
+ import {
+   ApprovalRequestId,
+   DEFAULT_MODEL,
+@@ -38,6 +39,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
+ 
+ import { buildCodexInitializeParams } from "./CodexProvider.ts";
+ import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
++import { makeSharedCodexTransport } from "./codexSharedTransport.ts";
+ import { expandHomePath } from "../../pathExpansion.ts";
+ import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+ const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+@@ -158,6 +160,7 @@ export interface CodexSessionRuntimeOptions {
+   readonly providerInstanceId?: ProviderInstanceId;
+   readonly binaryPath: string;
+   readonly homePath?: string;
++  readonly sharedSocketPath?: string;
+   readonly launchArgs?: string;
+   readonly environment?: NodeJS.ProcessEnv;
+   readonly cwd: string;
+@@ -170,6 +173,7 @@ export interface CodexSessionRuntimeOptions {
+ 
+ export interface CodexSessionRuntimeSendTurnInput {
+   readonly input?: string;
++  readonly clientUserMessageId?: string;
+   readonly attachments?: ReadonlyArray<{
+     readonly type: "image";
+     readonly url: string;
+@@ -279,7 +283,7 @@ interface PendingApproval {
+ 
+ interface ApprovalCorrelation {
+   readonly requestId: ApprovalRequestId;
+-  readonly requestKind: ProviderRequestKind;
++  readonly requestKind: ProviderRequestKind | undefined;
+   readonly turnId: TurnId | undefined;
+   readonly itemId: ProviderItemId | undefined;
+ }
+@@ -604,6 +608,7 @@ export function buildTurnStartParams(input: {
+   readonly interactionMode?: ProviderInteractionMode;
+   /** Defaults to true so callers that predate the agent-access gate are unchanged. */
+   readonly browserToolsAvailable?: boolean;
++  readonly preserveNativeSettings?: boolean;
+ }): Effect.Effect<
+   CodexTurnStartParamsWithCollaborationMode,
+   CodexErrors.CodexAppServerProtocolParseError
+@@ -630,13 +635,17 @@ export function buildTurnStartParams(input: {
+   return decodeCodexTurnStartParamsWithCollaborationMode({
+     threadId: input.threadId,
+     input: turnInput,
+-    approvalPolicy: config.approvalPolicy,
+-    approvalsReviewer: config.approvalsReviewer,
+-    sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
+-    ...(input.model ? { model: input.model } : {}),
+-    ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+-    ...(input.effort ? { effort: input.effort } : {}),
+-    ...(collaborationMode ? { collaborationMode } : {}),
++    ...(!input.preserveNativeSettings
++      ? {
++          approvalPolicy: config.approvalPolicy,
++          approvalsReviewer: config.approvalsReviewer,
++          sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
++          ...(input.model ? { model: input.model } : {}),
++          ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
++          ...(input.effort ? { effort: input.effort } : {}),
++          ...(collaborationMode ? { collaborationMode } : {}),
++        }
++      : {}),
+   }).pipe(
+     Effect.mapError((cause) =>
+       CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+@@ -709,6 +718,7 @@ export const openCodexThread = (input: {
+   readonly requestedModel: string | undefined;
+   readonly serviceTier: CodexServiceTier | undefined;
+   readonly resumeThreadId: string | undefined;
++  readonly shared?: boolean;
+ }): Effect.Effect<typeof CodexThreadResumeMetadata.Type, CodexErrors.CodexAppServerError> => {
+   const resumeThreadId = input.resumeThreadId;
+   const startParams = buildThreadStartParams({
+@@ -722,6 +732,27 @@ export const openCodexThread = (input: {
+     return input.client.request("thread/start", startParams);
+   }
+ 
++  if (input.shared) {
++    return input.client.raw
++      .request("thread/resume", {
++        threadId: resumeThreadId,
++        excludeTurns: true,
++      })
++      .pipe(
++        Effect.flatMap((response) =>
++          decodeCodexThreadResumeMetadata(response).pipe(
++            Effect.mapError((cause) =>
++              CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
++                "decode-response-payload",
++                cause,
++                { method: "thread/resume" },
++              ),
++            ),
++          ),
++        ),
++      );
++  }
++
+   // Older providers may still return history despite excludeTurns. Only the
+   // session metadata is needed here, so unrelated historical items cannot
+   // prevent resuming a valid provider thread.
+@@ -1209,33 +1240,47 @@ export const makeCodexSessionRuntime = (
+       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+     };
+     const extendEnv = options.environment === undefined;
+-    const appServerArgs = codexSessionAppServerArgs(options.appServerArgs, options.launchArgs);
+-    const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, appServerArgs, {
+-      env,
+-      extendEnv,
+-    });
+-    const child = yield* spawner
+-      .spawn(
+-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+-          cwd: options.cwd,
+-          env,
+-          extendEnv,
+-          forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
+-          shell: spawnCommand.shell,
+-        }),
+-      )
+-      .pipe(
+-        Effect.provideService(Scope.Scope, runtimeScope),
+-        Effect.mapError(
+-          (cause) =>
+-            new CodexErrors.CodexAppServerSpawnError({
+-              command: `${options.binaryPath} app-server`,
+-              cause,
+-            }),
+-        ),
+-      );
+-
+-    const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
++    const shared = options.sharedSocketPath !== undefined;
++    const child = shared
++      ? undefined
++      : yield* Effect.gen(function* () {
++          const appServerArgs = codexSessionAppServerArgs(
++            options.appServerArgs,
++            options.launchArgs,
++          );
++          const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, appServerArgs, {
++            env,
++            extendEnv,
++          });
++          return yield* spawner
++            .spawn(
++              ChildProcess.make(spawnCommand.command, spawnCommand.args, {
++                cwd: options.cwd,
++                env,
++                extendEnv,
++                forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
++                shell: spawnCommand.shell,
++              }),
++            )
++            .pipe(
++              Effect.provideService(Scope.Scope, runtimeScope),
++              Effect.mapError(
++                (cause) =>
++                  new CodexErrors.CodexAppServerSpawnError({
++                    command: `${options.binaryPath} app-server`,
++                    cause,
++                  }),
++              ),
++            );
++        });
++    const sharedTransport =
++      options.sharedSocketPath !== undefined
++        ? yield* makeSharedCodexTransport(options.sharedSocketPath)
++        : undefined;
++    const clientLayer = sharedTransport
++      ? CodexClient.layerStdio(sharedTransport.stdio, {}, sharedTransport.terminationError)
++      : CodexClient.layerChildProcess(child!);
++    const clientContext = yield* clientLayer.pipe(
+       Layer.build,
+       Effect.provideService(Scope.Scope, runtimeScope),
+     );
+@@ -1804,7 +1849,7 @@ export const makeCodexSessionRuntime = (
+           // conversation; interrupts are best-effort per child, so a
+           // false-positive entry costs one ignored RPC at worst.
+           const foreignThreadId = readNotificationThreadId(notification);
+-          if (foreignThreadId !== undefined) {
++          if (foreignThreadId !== undefined && (!shared || childParentTurnId !== undefined)) {
+             if (notification.method === "turn/started") {
+               const foreignTurnId =
+                 typeof (notification.params as { turn?: { id?: unknown } }).turn?.id === "string"
+@@ -1854,6 +1899,20 @@ export const makeCodexSessionRuntime = (
+             requestKind = correlation.requestKind;
+             turnId = correlation.turnId ?? turnId;
+             itemId = correlation.itemId ?? itemId;
++            const approval = (yield* Ref.get(pendingApprovalsRef)).get(correlation.requestId);
++            if (approval) yield* Deferred.interrupt(approval.decision);
++            const userInput = (yield* Ref.get(pendingUserInputsRef)).get(correlation.requestId);
++            if (userInput) {
++              yield* Deferred.interrupt(userInput.answers);
++              yield* emitEvent({
++                kind: "notification",
++                threadId: options.threadId,
++                method: "item/tool/requestUserInput/answered",
++                requestId: correlation.requestId,
++                ...(correlation.turnId ? { turnId: correlation.turnId } : {}),
++                payload: { answers: {} },
++              });
++            }
+             yield* Ref.update(approvalCorrelationsRef, (current) => {
+               const next = new Map(current);
+               next.delete(rawRequestId);
+@@ -1943,123 +2002,156 @@ export const makeCodexSessionRuntime = (
+       ),
+     );
+ 
+-    yield* client.handleServerRequest("item/commandExecution/requestApproval", (payload) =>
++    const ownsRequestThread = (threadId: string | undefined) =>
+       Effect.gen(function* () {
+-        const requestId = ApprovalRequestId.make(yield* randomUUIDv4("command-approval-request"));
+-        const turnId = TurnId.make(payload.turnId);
+-        const itemId = ProviderItemId.make(payload.itemId);
+-        const decision = yield* Deferred.make<ProviderApprovalDecision>();
++        if (!shared) return true;
++        if (!threadId) return false;
++        const root = currentProviderThreadId(yield* Ref.get(sessionRef));
++        return threadId === root || (yield* Ref.get(collabChildAgentsRef)).has(threadId);
++      });
+ 
+-        yield* Ref.update(pendingApprovalsRef, (current) => {
+-          const next = new Map(current);
+-          next.set(requestId, {
+-            requestId,
+-            jsonRpcId: payload.approvalId ?? payload.itemId,
+-            requestKind: "command",
+-            turnId,
+-            itemId,
+-            decision,
++    const approvalRequestId = (
++      purpose: CodexErrors.CodexAppServerIdentifierPurpose,
++      nativeId: string | number,
++      turnId: string | undefined,
++    ) =>
++      shared
++        ? Effect.succeed(
++            ApprovalRequestId.make(`shared:${options.threadId}:${turnId ?? "thread"}:${nativeId}`),
++          )
++        : randomUUIDv4(purpose).pipe(Effect.map(ApprovalRequestId.make));
++
++    yield* client.handleServerRequest(
++      "item/commandExecution/requestApproval",
++      (payload, nativeRequestId) =>
++        Effect.gen(function* () {
++          if (!(yield* ownsRequestThread(payload.threadId))) return yield* Effect.never;
++          const requestId = yield* approvalRequestId(
++            "command-approval-request",
++            nativeRequestId,
++            payload.turnId,
++          );
++          const turnId = TurnId.make(payload.turnId);
++          const itemId = ProviderItemId.make(payload.itemId);
++          const decision = yield* Deferred.make<ProviderApprovalDecision>();
++
++          yield* Ref.update(pendingApprovalsRef, (current) => {
++            const next = new Map(current);
++            next.set(requestId, {
++              requestId,
++              jsonRpcId: String(nativeRequestId),
++              requestKind: "command",
++              turnId,
++              itemId,
++              decision,
++            });
++            return next;
+           });
+-          return next;
+-        });
+-        yield* Ref.update(approvalCorrelationsRef, (current) => {
+-          const next = new Map(current);
+-          next.set(payload.approvalId ?? payload.itemId, {
++          yield* Ref.update(approvalCorrelationsRef, (current) => {
++            const next = new Map(current);
++            next.set(String(nativeRequestId), {
++              requestId,
++              requestKind: "command",
++              turnId,
++              itemId,
++            });
++            return next;
++          });
++
++          yield* emitEvent({
++            kind: "request",
++            threadId: options.threadId,
++            method: "item/commandExecution/requestApproval",
+             requestId,
+             requestKind: "command",
+-            turnId,
+-            itemId,
++            ...(turnId ? { turnId } : {}),
++            ...(itemId ? { itemId } : {}),
++            payload,
+           });
+-          return next;
+-        });
+ 
+-        yield* emitEvent({
+-          kind: "request",
+-          threadId: options.threadId,
+-          method: "item/commandExecution/requestApproval",
+-          requestId,
+-          requestKind: "command",
+-          ...(turnId ? { turnId } : {}),
+-          ...(itemId ? { itemId } : {}),
+-          payload,
+-        });
+-
+-        const resolved = yield* Deferred.await(decision).pipe(
+-          Effect.ensuring(
+-            Ref.update(pendingApprovalsRef, (current) => {
+-              const next = new Map(current);
+-              next.delete(requestId);
+-              return next;
+-            }),
+-          ),
+-        );
+-        return {
+-          decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
+-        } satisfies EffectCodexSchema.CommandExecutionRequestApprovalResponse;
+-      }),
++          const resolved = yield* Deferred.await(decision).pipe(
++            Effect.ensuring(
++              Ref.update(pendingApprovalsRef, (current) => {
++                const next = new Map(current);
++                next.delete(requestId);
++                return next;
++              }),
++            ),
++          );
++          return {
++            decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
++          } satisfies EffectCodexSchema.CommandExecutionRequestApprovalResponse;
++        }),
+     );
+ 
+-    yield* client.handleServerRequest("item/fileChange/requestApproval", (payload) =>
+-      Effect.gen(function* () {
+-        const requestId = ApprovalRequestId.make(
+-          yield* randomUUIDv4("file-change-approval-request"),
+-        );
+-        const turnId = TurnId.make(payload.turnId);
+-        const itemId = ProviderItemId.make(payload.itemId);
+-        const decision = yield* Deferred.make<ProviderApprovalDecision>();
++    yield* client.handleServerRequest(
++      "item/fileChange/requestApproval",
++      (payload, nativeRequestId) =>
++        Effect.gen(function* () {
++          if (!(yield* ownsRequestThread(payload.threadId))) return yield* Effect.never;
++          const requestId = yield* approvalRequestId(
++            "file-change-approval-request",
++            nativeRequestId,
++            payload.turnId,
++          );
++          const turnId = TurnId.make(payload.turnId);
++          const itemId = ProviderItemId.make(payload.itemId);
++          const decision = yield* Deferred.make<ProviderApprovalDecision>();
+ 
+-        yield* Ref.update(pendingApprovalsRef, (current) => {
+-          const next = new Map(current);
+-          next.set(requestId, {
+-            requestId,
+-            jsonRpcId: payload.itemId,
+-            requestKind: "file-change",
+-            turnId,
+-            itemId,
+-            decision,
++          yield* Ref.update(pendingApprovalsRef, (current) => {
++            const next = new Map(current);
++            next.set(requestId, {
++              requestId,
++              jsonRpcId: String(nativeRequestId),
++              requestKind: "file-change",
++              turnId,
++              itemId,
++              decision,
++            });
++            return next;
+           });
+-          return next;
+-        });
+-        yield* Ref.update(approvalCorrelationsRef, (current) => {
+-          const next = new Map(current);
+-          next.set(payload.itemId, {
++          yield* Ref.update(approvalCorrelationsRef, (current) => {
++            const next = new Map(current);
++            next.set(String(nativeRequestId), {
++              requestId,
++              requestKind: "file-change",
++              turnId,
++              itemId,
++            });
++            return next;
++          });
++
++          yield* emitEvent({
++            kind: "request",
++            threadId: options.threadId,
++            method: "item/fileChange/requestApproval",
+             requestId,
+             requestKind: "file-change",
+-            turnId,
+-            itemId,
++            ...(turnId ? { turnId } : {}),
++            ...(itemId ? { itemId } : {}),
++            payload,
+           });
+-          return next;
+-        });
+-
+-        yield* emitEvent({
+-          kind: "request",
+-          threadId: options.threadId,
+-          method: "item/fileChange/requestApproval",
+-          requestId,
+-          requestKind: "file-change",
+-          ...(turnId ? { turnId } : {}),
+-          ...(itemId ? { itemId } : {}),
+-          payload,
+-        });
+ 
+-        const resolved = yield* Deferred.await(decision).pipe(
+-          Effect.ensuring(
+-            Ref.update(pendingApprovalsRef, (current) => {
+-              const next = new Map(current);
+-              next.delete(requestId);
+-              return next;
+-            }),
+-          ),
+-        );
+-        return {
+-          decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
+-        } satisfies EffectCodexSchema.FileChangeRequestApprovalResponse;
+-      }),
++          const resolved = yield* Deferred.await(decision).pipe(
++            Effect.ensuring(
++              Ref.update(pendingApprovalsRef, (current) => {
++                const next = new Map(current);
++                next.delete(requestId);
++                return next;
++              }),
++            ),
++          );
++          return {
++            decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
++          } satisfies EffectCodexSchema.FileChangeRequestApprovalResponse;
++        }),
+     );
+ 
+-    yield* client.handleServerRequest("mcpServer/elicitation/request", (payload) =>
++    yield* client.handleServerRequest("mcpServer/elicitation/request", (payload, nativeRequestId) =>
+       Effect.gen(function* () {
++        if (!(yield* ownsRequestThread(payload.threadId))) return yield* Effect.never;
+         if (toMcpElicitationResponse(payload, "accept").action !== "accept") {
++          if (shared) return yield* Effect.never;
+           yield* Effect.logWarning("Declined an unsupported MCP elicitation.", {
+             serverName: payload.serverName,
+             mode: payload.mode,
+@@ -2069,11 +2161,15 @@ export const makeCodexSessionRuntime = (
+           } satisfies EffectCodexSchema.McpServerElicitationRequestResponse;
+         }
+ 
+-        const requestId = ApprovalRequestId.make(yield* randomUUIDv4("mcp-elicitation-request"));
++        const requestId = yield* approvalRequestId(
++          "mcp-elicitation-request",
++          nativeRequestId,
++          payload.turnId ?? undefined,
++        );
+         const turnId = payload.turnId
+           ? TurnId.make(payload.turnId)
+           : (yield* Ref.get(sessionRef)).activeTurnId;
+-        const jsonRpcId = payload.mode === "url" ? payload.elicitationId : requestId;
++        const jsonRpcId = String(nativeRequestId);
+         const decision = yield* Deferred.make<ProviderApprovalDecision>();
+ 
+         yield* Ref.update(pendingApprovalsRef, (current) => {
+@@ -2122,12 +2218,25 @@ export const makeCodexSessionRuntime = (
+       }),
+     );
+ 
+-    yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
++    yield* client.handleServerRequest("item/tool/requestUserInput", (payload, nativeRequestId) =>
+       Effect.gen(function* () {
+-        const requestId = ApprovalRequestId.make(yield* randomUUIDv4("user-input-request"));
++        if (!(yield* ownsRequestThread(payload.threadId))) return yield* Effect.never;
++        const requestId = yield* approvalRequestId(
++          "user-input-request",
++          nativeRequestId,
++          payload.turnId,
++        );
+         const turnId = TurnId.make(payload.turnId);
+         const itemId = ProviderItemId.make(payload.itemId);
+         const answers = yield* Deferred.make<ProviderUserInputAnswers>();
++        yield* Ref.update(approvalCorrelationsRef, (current) =>
++          new Map(current).set(String(nativeRequestId), {
++            requestId,
++            requestKind: undefined,
++            turnId,
++            itemId,
++          }),
++        );
+ 
+         yield* Ref.update(pendingUserInputsRef, (current) => {
+           const next = new Map(current);
+@@ -2173,7 +2282,9 @@ export const makeCodexSessionRuntime = (
+     );
+ 
+     yield* client.handleUnknownServerRequest((method) =>
+-      Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
++      shared
++        ? Effect.never
++        : Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
+     );
+ 
+     const registerServerNotification = <M extends CodexRpc.ServerNotificationMethod>(method: M) =>
+@@ -2197,39 +2308,45 @@ export const makeCodexSessionRuntime = (
+     );
+ 
+     const stderrRemainderRef = yield* Ref.make("");
+-    yield* child.stderr.pipe(
+-      Stream.decodeText(),
+-      Stream.runForEach((chunk) =>
+-        Ref.modify(stderrRemainderRef, (current) => {
+-          const combined = current + chunk;
+-          const lines = combined.split("\n");
+-          const remainder = lines.pop() ?? "";
+-          return [lines.map((line) => line.replace(/\r$/, "")), remainder] as const;
+-        }).pipe(
+-          Effect.flatMap((lines) =>
+-            Effect.forEach(
+-              lines,
+-              (line) => {
+-                const classified = classifyCodexStderrLine(line);
+-                if (!classified) {
+-                  return Effect.void;
+-                }
+-                return emitEvent({
+-                  kind: "notification",
+-                  threadId: options.threadId,
+-                  method: "process/stderr",
+-                  message: classified.message,
+-                });
+-              },
+-              { discard: true },
++    if (child) {
++      yield* child.stderr.pipe(
++        Stream.decodeText(),
++        Stream.runForEach((chunk) =>
++          Ref.modify(stderrRemainderRef, (current) => {
++            const combined = current + chunk;
++            const lines = combined.split("\n");
++            const remainder = lines.pop() ?? "";
++            return [lines.map((line) => line.replace(/\r$/, "")), remainder] as const;
++          }).pipe(
++            Effect.flatMap((lines) =>
++              Effect.forEach(
++                lines,
++                (line) => {
++                  const classified = classifyCodexStderrLine(line);
++                  if (!classified) {
++                    return Effect.void;
++                  }
++                  return emitEvent({
++                    kind: "notification",
++                    threadId: options.threadId,
++                    method: "process/stderr",
++                    message: classified.message,
++                  });
++                },
++                { discard: true },
++              ),
+             ),
+           ),
+         ),
+-      ),
+-      Effect.forkIn(runtimeScope),
+-    );
+-
+-    yield* child.exitCode.pipe(
++        Effect.forkIn(runtimeScope),
++      );
++    }
++    const connectionExit = Effect.gen(function* () {
++      return child
++        ? Number(yield* child.exitCode)
++        : yield* sharedTransport!.terminationError.pipe(Effect.as(1));
++    });
++    yield* connectionExit.pipe(
+       Effect.flatMap((exitCode) =>
+         Ref.get(closedRef).pipe(
+           Effect.flatMap((closed) => {
+@@ -2257,6 +2374,23 @@ export const makeCodexSessionRuntime = (
+     );
+ 
+     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
++      const registrationDirectory = process.env.T3_CODEX_SHARED_REGISTRATIONS;
++      const nativeThreadId = readResumeCursorThreadId(options.resumeCursor);
++      if (shared && registrationDirectory && nativeThreadId) {
++        const disabled = yield* Effect.tryPromise({
++          try: () => unsharedThreads(registrationDirectory),
++          catch: (cause) =>
++            new CodexErrors.CodexAppServerTransportError({ operation: "check-sharing", cause }),
++        });
++        if (disabled.includes(nativeThreadId)) {
++          return yield* new CodexErrors.CodexAppServerTransportError({
++            operation: "check-sharing",
++            cause: new Error(
++              "T3 sharing is disabled. Resume this session with bridge codex resume to share it again.",
++            ),
++          });
++        }
++      }
+       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
+       yield* client.request("initialize", buildCodexInitializeParams());
+       yield* client.notify("initialized", undefined);
+@@ -2271,12 +2405,43 @@ export const makeCodexSessionRuntime = (
+         requestedModel,
+         serviceTier: options.serviceTier,
+         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
++        shared,
+       });
+ 
+       const providerThreadId = opened.thread.id;
++      const activeTurnId =
++        shared && options.resumeCursor
++          ? yield* client.raw
++              .request("thread/read", { threadId: providerThreadId, includeTurns: true })
++              .pipe(
++                Effect.flatMap(
++                  Schema.decodeUnknownEffect(
++                    Schema.Struct({
++                      thread: Schema.Struct({
++                        turns: Schema.Array(
++                          Schema.Struct({ id: Schema.String, status: Schema.String }),
++                        ),
++                      }),
++                    }),
++                  ),
++                ),
++                Effect.map(
++                  (response) =>
++                    response.thread.turns.find((turn) => turn.status === "inProgress")?.id,
++                ),
++                Effect.mapError(
++                  (cause) =>
++                    new CodexErrors.CodexAppServerTransportError({
++                      operation: "read-input-stream",
++                      cause,
++                    }),
++                ),
++              )
++          : undefined;
+       const session = {
+         ...(yield* Ref.get(sessionRef)),
+-        status: "ready",
++        status: activeTurnId ? "running" : "ready",
++        activeTurnId: activeTurnId ? TurnId.make(activeTurnId) : undefined,
+         cwd: opened.cwd,
+         model: opened.model,
+         resumeCursor: { threadId: providerThreadId },
+@@ -2302,8 +2467,10 @@ export const makeCodexSessionRuntime = (
+       if (alreadyClosed) {
+         return;
+       }
+-      yield* settlePendingApprovals("cancel");
+-      yield* settlePendingUserInputs({});
++      if (!shared) {
++        yield* settlePendingApprovals("cancel");
++        yield* settlePendingUserInputs({});
++      }
+       yield* updateSession(sessionRef, {
+         status: "closed",
+         activeTurnId: undefined,
+@@ -2328,7 +2495,7 @@ export const makeCodexSessionRuntime = (
+       sendTurn: (input) =>
+         Effect.gen(function* () {
+           const providerThreadId = yield* readProviderThreadId;
+-          if (hasConfiguredMcpServer(options.appServerArgs)) {
++          if (!shared && hasConfiguredMcpServer(options.appServerArgs)) {
+             yield* client.request("config/mcpServer/reload", undefined).pipe(
+               Effect.catch((cause) =>
+                 Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {
+@@ -2343,6 +2510,7 @@ export const makeCodexSessionRuntime = (
+           const params = yield* buildTurnStartParams({
+             threadId: providerThreadId,
+             runtimeMode: options.runtimeMode,
++            preserveNativeSettings: shared,
+             ...(input.input ? { prompt: input.input } : {}),
+             ...(input.attachments ? { attachments: input.attachments } : {}),
+             ...(normalizedModel ? { model: normalizedModel } : {}),
+@@ -2354,7 +2522,12 @@ export const makeCodexSessionRuntime = (
+             // has even if the setting changed after the session started.
+             browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+           });
+-          const rawResponse = yield* client.raw.request("turn/start", params);
++          const rawResponse = yield* client.raw.request("turn/start", {
++            ...params,
++            ...(shared && input.clientUserMessageId
++              ? { clientUserMessageId: input.clientUserMessageId }
++              : {}),
++          });
+           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
+             Effect.mapError((error) =>
+               CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+@@ -2371,7 +2544,7 @@ export const makeCodexSessionRuntime = (
+             // running. The response contains the queued turn id, but
+             // turn/interrupt only accepts the id that is active now.
+             activeTurnId: session.activeTurnId ?? turnId,
+-            ...(normalizedModel ? { model: normalizedModel } : {}),
++            ...(!shared && normalizedModel ? { model: normalizedModel } : {}),
+           }));
+           const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+           return {
+@@ -2406,7 +2579,7 @@ export const makeCodexSessionRuntime = (
+                 .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
+             { concurrency: 8, discard: true },
+           ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
+-          const effectiveTurnId = turnId ?? session.activeTurnId;
++          const effectiveTurnId = shared ? session.activeTurnId : (turnId ?? session.activeTurnId);
+           if (!effectiveTurnId) {
+             return;
+           }
+diff --git a/apps/server/src/provider/Layers/codexSharedTransport.test.ts b/apps/server/src/provider/Layers/codexSharedTransport.test.ts
+new file mode 100644
+index 000000000..4e92ad2c4
+--- /dev/null
++++ b/apps/server/src/provider/Layers/codexSharedTransport.test.ts
+@@ -0,0 +1,69 @@
++// @effect-diagnostics nodeBuiltinImport:off - exercises a real Unix WebSocket peer.
++import * as NodeHttp from "node:http";
++import * as NodeFSP from "node:fs/promises";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++
++import { NodeWS } from "@effect/platform-node/NodeSocket";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as CodexClient from "effect-codex-app-server/client";
++import { describe, expect } from "vite-plus/test";
++import { it } from "@effect/vitest";
++
++import { makeSharedCodexTransport } from "./codexSharedTransport.ts";
++
++describe("shared Codex socket", () => {
++  it.effect("preserves message boundaries and uses text frames without compression", () =>
++    Effect.gen(function* () {
++      const dir = yield* Effect.promise(() =>
++        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "codex-ws-")),
++      );
++      const socketPath = NodePath.join(dir, "rpc.sock");
++      const http = NodeHttp.createServer();
++      const server = new NodeWS.WebSocketServer({ server: http });
++      let compression: string | undefined;
++      let binaryFrame = false;
++      server.on("connection", (socket, request) => {
++        compression = request.headers["sec-websocket-extensions"];
++        socket.on("message", (data, binary) => {
++          binaryFrame ||= binary;
++          const message = JSON.parse(data.toString());
++          socket.send(JSON.stringify({ method: "test/notice", params: { text: "one\ntwo" } }));
++          socket.send(JSON.stringify({ id: message.id, result: { text: "héllo\nworld" } }));
++        });
++      });
++      yield* Effect.promise(() => new Promise<void>((resolve) => http.listen(socketPath, resolve)));
++      try {
++        const result = yield* Effect.scoped(
++          Effect.gen(function* () {
++            const transport = yield* makeSharedCodexTransport(socketPath);
++            const context = yield* Layer.build(
++              CodexClient.layerStdio(transport.stdio, {}, transport.terminationError),
++            );
++            const client = yield* CodexClient.CodexAppServerClient.pipe(Effect.provide(context));
++            return yield* client.raw.request("test/echo", { text: "hello" });
++          }),
++        );
++        expect(result).toEqual({ text: "héllo\nworld" });
++        expect(compression).toBeUndefined();
++        expect(binaryFrame).toBe(false);
++        expect(http.listening).toBe(true);
++      } finally {
++        for (const socket of server.clients) socket.terminate();
++        server.close();
++        http.close();
++        yield* Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true }));
++      }
++    }),
++  );
++
++  it.effect("reports a missing socket without starting a process", () =>
++    Effect.gen(function* () {
++      const error = yield* Effect.scoped(makeSharedCodexTransport("/nonexistent/codex.sock")).pipe(
++        Effect.flip,
++      );
++      expect(error.message).toContain("connect-shared-socket");
++    }),
++  );
++});
+diff --git a/apps/server/src/provider/Layers/codexSharedTransport.ts b/apps/server/src/provider/Layers/codexSharedTransport.ts
+new file mode 100644
+index 000000000..f05c1c6b3
+--- /dev/null
++++ b/apps/server/src/provider/Layers/codexSharedTransport.ts
+@@ -0,0 +1,93 @@
++import * as NodeStream from "node:stream";
++
++import { NodeWS } from "@effect/platform-node/NodeSocket";
++import * as EffectNodeStream from "@effect/platform-node/NodeStream";
++import * as Effect from "effect/Effect";
++import * as PlatformError from "effect/PlatformError";
++import * as Sink from "effect/Sink";
++import * as Stdio from "effect/Stdio";
++import * as CodexErrors from "effect-codex-app-server/errors";
++
++export const makeSharedCodexTransport = Effect.fn("makeSharedCodexTransport")(function* (
++  socketPath: string,
++) {
++  const connectError = (cause: unknown) =>
++    new CodexErrors.CodexAppServerTransportError({
++      operation: "connect-shared-socket",
++      cause,
++    });
++  if (!socketPath.startsWith("/") || /[:?#]/.test(socketPath)) {
++    return yield* connectError(
++      new Error("Expected an absolute Unix socket path without URL delimiters."),
++    );
++  }
++  const socket = yield* Effect.acquireRelease(
++    Effect.try({
++      try: () =>
++        new NodeWS.WebSocket(`ws+unix://${socketPath}:/`, {
++          // Codex's Unix listener rejects the compression extension offered by ws by default.
++          perMessageDeflate: false,
++          handshakeTimeout: 5000,
++        }),
++      catch: connectError,
++    }),
++    (socket) => Effect.sync(() => socket.terminate()),
++  );
++  const input = new NodeStream.Readable({ read: () => socket.resume() });
++  const terminated = new Promise<CodexErrors.CodexAppServerError>((resolve) => {
++    socket.on("error", (cause) => {
++      resolve(
++        new CodexErrors.CodexAppServerTransportError({ operation: "read-input-stream", cause }),
++      );
++      input.push(null);
++    });
++    socket.on("close", () => {
++      resolve(new CodexErrors.CodexAppServerInputStreamEndedError({}));
++      input.push(null);
++    });
++  });
++  socket.on("message", (data, binary) => {
++    if (binary) {
++      socket.close(1003, "Expected JSON text frames");
++      return;
++    }
++    if (!input.push(Buffer.from(`${data.toString()}\n`))) socket.pause();
++  });
++  yield* Effect.tryPromise({
++    try: () =>
++      new Promise<void>((resolve, reject) => {
++        socket.once("open", resolve);
++        socket.once("error", reject);
++      }),
++    catch: connectError,
++  });
++  const ioError = (cause: unknown) =>
++    PlatformError.systemError({
++      _tag: "Unknown",
++      module: "CodexSharedSocket",
++      method: "io",
++      cause,
++    });
++  return {
++    terminationError: Effect.promise(() => terminated),
++    stdio: Stdio.make({
++      args: Effect.succeed([]),
++      stdin: EffectNodeStream.fromReadable({ evaluate: () => input, onError: ioError }),
++      stdout: () =>
++        Sink.forEach((chunk: string | Uint8Array) =>
++          Effect.tryPromise({
++            try: () =>
++              new Promise<void>((resolve, reject) =>
++                socket.send(
++                  typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"),
++                  { binary: false },
++                  (error) => (error ? reject(error) : resolve()),
++                ),
++              ),
++            catch: ioError,
++          }),
++        ),
++      stderr: () => Sink.drain,
++    }),
++  };
++});
+diff --git a/apps/server/src/provider/SharedCodexDiscovery.test.ts b/apps/server/src/provider/SharedCodexDiscovery.test.ts
+new file mode 100644
+index 000000000..9dd784e4f
+--- /dev/null
++++ b/apps/server/src/provider/SharedCodexDiscovery.test.ts
+@@ -0,0 +1,93 @@
++import { ThreadId } from "@t3tools/contracts";
++import { describe, expect, it } from "vite-plus/test";
++
++import { nativeMessages, shouldAttachSharedThread } from "./SharedCodexDiscovery.ts";
++
++describe("native history reconciliation", () => {
++  it("keeps native identities and excludes unfinished assistant snapshots", () => {
++    const history = {
++      id: "native",
++      cwd: "/project",
++      name: null,
++      preview: "hello",
++      createdAt: 1000,
++      updatedAt: 1002,
++      turns: [
++        {
++          id: "done",
++          status: "completed",
++          startedAt: 1000,
++          items: [
++            {
++              type: "userMessage",
++              id: "u1",
++              clientId: "t3-message",
++              content: [{ type: "text", text: "hello" }],
++            },
++            { type: "agentMessage", id: "a1", text: "done" },
++            { type: "commandExecution", id: "tool" },
++          ],
++        },
++        {
++          id: "active",
++          status: "inProgress",
++          items: [
++            { type: "userMessage", id: "u2", content: [{ type: "text", text: "next" }] },
++            { type: "agentMessage", id: "a2", text: "partial" },
++          ],
++        },
++      ],
++    };
++    const result = nativeMessages(ThreadId.make("t3"), history);
++    expect(
++      result.map(({ messageId, clientMessageId, text, turnId }) => ({
++        messageId,
++        clientMessageId,
++        text,
++        turnId,
++      })),
++    ).toEqual([
++      {
++        messageId: "native-user:t3:u1",
++        clientMessageId: "t3-message",
++        text: "hello",
++        turnId: "done",
++      },
++      { messageId: "assistant:a1", clientMessageId: undefined, text: "done", turnId: "done" },
++      {
++        messageId: "native-user:t3:u2",
++        clientMessageId: undefined,
++        text: "next",
++        turnId: "active",
++      },
++    ]);
++    expect(result[0]?.createdAt).toBe("1970-01-01T00:16:40.000Z");
++    expect(result[1]?.createdAt).toBe("1970-01-01T00:16:40.001Z");
++  });
++});
++
++describe("shared discovery after idle reaping", () => {
++  const stopped = { status: "stopped", lastSeenAt: "2026-09-12T12:00:00.500Z" };
++  const idle = { updatedAt: Date.parse("2026-09-12T12:00:00Z") / 1000, status: { type: "idle" } };
++  it("keeps unchanged reaped sessions detached across discovery sweeps", () => {
++    expect(shouldAttachSharedThread(stopped, idle)).toBe(false);
++    expect(shouldAttachSharedThread(stopped, { ...idle, updatedAt: idle.updatedAt - 3600 })).toBe(
++      false,
++    );
++  });
++  it("reattaches for native work or an approval wait even within the same timestamp second", () => {
++    expect(shouldAttachSharedThread(stopped, { ...idle, status: { type: "active" } })).toBe(true);
++  });
++  it("reconciles work completed while detached", () => {
++    expect(shouldAttachSharedThread(stopped, { ...idle, updatedAt: idle.updatedAt + 1 })).toBe(
++      true,
++    );
++  });
++  it("imports new sessions and restores connections that were not intentionally stopped", () => {
++    expect(shouldAttachSharedThread(undefined, idle)).toBe(true);
++    expect(shouldAttachSharedThread({ ...stopped, status: "running" }, idle)).toBe(true);
++  });
++  it("does not treat an absent status as activity", () => {
++    expect(shouldAttachSharedThread(stopped, { updatedAt: idle.updatedAt })).toBe(false);
++  });
++});
+diff --git a/apps/server/src/provider/SharedCodexDiscovery.ts b/apps/server/src/provider/SharedCodexDiscovery.ts
+new file mode 100644
+index 000000000..4c73bf773
+--- /dev/null
++++ b/apps/server/src/provider/SharedCodexDiscovery.ts
+@@ -0,0 +1,375 @@
++import {
++  CommandId,
++  MessageId,
++  ProjectId,
++  ProviderInstanceId,
++  ProviderDriverKind,
++  ThreadId,
++  TurnId,
++} from "@t3tools/contracts";
++import * as Crypto from "effect/Crypto";
++import * as DateTime from "effect/DateTime";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Option from "effect/Option";
++import * as Schema from "effect/Schema";
++import * as Schedule from "effect/Schedule";
++import * as CodexClient from "effect-codex-app-server/client";
++
++import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
++import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
++import { ProviderService } from "./Services/ProviderService.ts";
++import { ProviderSessionDirectory } from "./Services/ProviderSessionDirectory.ts";
++import { makeSharedCodexTransport } from "./Layers/codexSharedTransport.ts";
++import { sharedCodexSocket } from "./sharedCodex.ts";
++import { registeredSharedThreads, unsharedThreads } from "./sharedCodexRegistration.ts";
++
++class SharedCodexConfigError extends Schema.TaggedErrorClass<SharedCodexConfigError>()(
++  "SharedCodexConfigError",
++  { message: Schema.String },
++) {}
++
++const NativeThread = Schema.Struct({
++  id: Schema.String,
++  ephemeral: Schema.optionalKey(Schema.Boolean),
++  parentThreadId: Schema.optionalKey(Schema.NullOr(Schema.String)),
++  cwd: Schema.String,
++  preview: Schema.String,
++  name: Schema.NullOr(Schema.String),
++  model: Schema.optionalKey(Schema.NullOr(Schema.String)),
++  createdAt: Schema.Number,
++  updatedAt: Schema.Number,
++  status: Schema.optionalKey(Schema.Struct({ type: Schema.String })),
++  turns: Schema.Array(
++    Schema.Struct({
++      id: Schema.String,
++      status: Schema.String,
++      startedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
++      items: Schema.Array(Schema.Unknown),
++    }),
++  ),
++});
++const NativeUserMessage = Schema.Struct({
++  type: Schema.Literal("userMessage"),
++  id: Schema.String,
++  clientId: Schema.optionalKey(Schema.NullOr(Schema.String)),
++  content: Schema.Array(
++    Schema.Struct({ type: Schema.String, text: Schema.optionalKey(Schema.String) }),
++  ),
++});
++const NativeAgentMessage = Schema.Struct({
++  type: Schema.Literal("agentMessage"),
++  id: Schema.String,
++  text: Schema.String,
++});
++const decodeNativeMessage = Schema.decodeUnknownOption(
++  Schema.Union([NativeUserMessage, NativeAgentMessage]),
++);
++const decodeThread = Schema.decodeUnknownEffect(Schema.Struct({ thread: NativeThread }));
++const decodeThreadPage = Schema.decodeUnknownEffect(
++  Schema.Struct({ data: Schema.Array(NativeThread), nextCursor: Schema.NullOr(Schema.String) }),
++);
++const decodeLoadedPage = Schema.decodeUnknownEffect(
++  Schema.Struct({ data: Schema.Array(Schema.String), nextCursor: Schema.NullOr(Schema.String) }),
++);
++const decodeProjectRoots = Schema.decodeUnknownEffect(
++  Schema.fromJsonString(Schema.Array(Schema.String)),
++);
++
++export function shouldAttachSharedThread(
++  binding: { status?: string; lastSeenAt: string } | undefined,
++  native: { updatedAt: number; status?: { type: string } },
++): boolean {
++  if (binding?.status !== "stopped") return true;
++  // A loaded thread can be waiting for native idle expiry. Discovery must not
++  // restart its subscription solely because T3's idle reaper detached it.
++  return (
++    native.status?.type === "active" || native.updatedAt * 1000 > Date.parse(binding.lastSeenAt)
++  );
++}
++
++export function nativeMessages(threadId: ThreadId, thread: typeof NativeThread.Type) {
++  return thread.turns.flatMap((turn) =>
++    turn.items.flatMap((raw, itemIndex) => {
++      const message = Option.getOrUndefined(decodeNativeMessage(raw));
++      if (!message || (message.type === "agentMessage" && turn.status === "inProgress")) return [];
++      const user = message.type === "userMessage";
++      const text = user
++        ? message.content
++            .flatMap((part) => (part.type === "text" && part.text ? [part.text] : []))
++            .join("\n")
++        : message.text;
++      if (!text) return [];
++      return [
++        {
++          threadId,
++          messageId: MessageId.make(
++            user ? `native-user:${threadId}:${message.id}` : `assistant:${message.id}`,
++          ),
++          ...(user && message.clientId
++            ? { clientMessageId: MessageId.make(message.clientId) }
++            : {}),
++          turnId: TurnId.make(turn.id),
++          role: user ? ("user" as const) : ("assistant" as const),
++          text,
++          createdAt: DateTime.formatIso(
++            DateTime.makeUnsafe((turn.startedAt ?? thread.createdAt) * 1000 + itemIndex),
++          ),
++        },
++      ];
++    }),
++  );
++}
++
++export const startSharedCodexDiscovery = Effect.fn("startSharedCodexDiscovery")(function* () {
++  const socketPath = sharedCodexSocket("codex");
++  if (!socketPath) return;
++  const roots = yield* decodeProjectRoots(process.env.T3_CODEX_SHARED_PROJECTS ?? "[]");
++  const registrationDirectory = process.env.T3_CODEX_SHARED_REGISTRATIONS;
++  if ((!roots.length && !registrationDirectory) || roots.some((root) => !root.startsWith("/"))) {
++    return yield* new SharedCodexConfigError({
++      message: "Configure absolute T3_CODEX_SHARED_PROJECTS or T3_CODEX_SHARED_REGISTRATIONS.",
++    });
++  }
++  const crypto = yield* Crypto.Crypto;
++  const environmentKey = Buffer.from(
++    yield* crypto.digest("SHA-256", new TextEncoder().encode(socketPath)),
++  )
++    .toString("hex")
++    .slice(0, 16);
++  const engine = yield* OrchestrationEngineService;
++  const snapshots = yield* ProjectionSnapshotQuery;
++  const providers = yield* ProviderService;
++  const directory = yield* ProviderSessionDirectory;
++  const instanceId = ProviderInstanceId.make("codex");
++  const commandId = Effect.map(crypto.randomUUIDv4, CommandId.make);
++
++  const connection = Effect.scoped(
++    Effect.gen(function* () {
++      const transport = yield* makeSharedCodexTransport(socketPath);
++      const context = yield* Layer.build(
++        CodexClient.layerStdio(transport.stdio, {}, transport.terminationError),
++      );
++      const client = yield* CodexClient.CodexAppServerClient.pipe(Effect.provide(context));
++      yield* client.raw.request("initialize", {
++        clientInfo: { name: "t3_shared_discovery", version: "0.1.0" },
++        capabilities: { experimentalApi: true },
++      });
++      yield* client.raw.notify("initialized");
++      const synchronize = Effect.gen(function* () {
++        const disabled = new Set(
++          registrationDirectory
++            ? yield* Effect.tryPromise(() => unsharedThreads(registrationDirectory))
++            : [],
++        );
++        if (disabled.size) {
++          const bindings = yield* directory.listBindings();
++          for (const binding of bindings) {
++            const cursor = binding.resumeCursor;
++            if (
++              binding.providerInstanceId === instanceId &&
++              binding.status !== "stopped" &&
++              typeof cursor === "object" &&
++              cursor !== null &&
++              "threadId" in cursor &&
++              typeof cursor.threadId === "string" &&
++              disabled.has(cursor.threadId)
++            ) {
++              yield* providers.stopSession({ threadId: binding.threadId });
++            }
++          }
++        }
++        const loaded = new Set<string>();
++        let cursor: string | null = null;
++        do {
++          const page: { data: ReadonlyArray<string>; nextCursor: string | null } = yield* client.raw
++            .request("thread/loaded/list", { cursor, limit: 100 })
++            .pipe(Effect.flatMap(decodeLoadedPage));
++          for (const id of page.data) loaded.add(id);
++          cursor = page.nextCursor;
++        } while (cursor);
++        const candidates: Array<typeof NativeThread.Type> = [];
++        if (roots.length)
++          do {
++            const page: {
++              data: ReadonlyArray<typeof NativeThread.Type>;
++              nextCursor: string | null;
++            } = yield* client.raw
++              .request("thread/list", {
++                cursor,
++                cwd: roots,
++                limit: 100,
++                useStateDbOnly: true,
++                sourceKinds: ["cli", "appServer", "vscode"],
++              })
++              .pipe(Effect.flatMap(decodeThreadPage));
++            candidates.push(
++              ...page.data.filter(
++                (thread) =>
++                  !thread.ephemeral &&
++                  !thread.parentThreadId &&
++                  loaded.has(thread.id) &&
++                  roots.includes(thread.cwd) &&
++                  thread.preview.length > 0,
++              ),
++            );
++            cursor = page.nextCursor;
++          } while (cursor);
++        if (registrationDirectory) {
++          const registered = yield* Effect.tryPromise(() =>
++            registeredSharedThreads(registrationDirectory),
++          );
++          for (const id of registered) {
++            if (!loaded.has(id) || candidates.some((candidate) => candidate.id === id)) continue;
++            yield* client.raw.request("thread/read", { threadId: id, includeTurns: false }).pipe(
++              Effect.flatMap(decodeThread),
++              Effect.tap(({ thread }) =>
++                Effect.sync(() => {
++                  if (!thread.ephemeral && !thread.parentThreadId && thread.preview.length > 0)
++                    candidates.push(thread);
++                }),
++              ),
++              Effect.catch((cause) =>
++                Effect.logWarning("Registered shared thread could not be read", {
++                  nativeThreadId: id,
++                  cause,
++                }),
++              ),
++            );
++          }
++        }
++        const shell = yield* snapshots.getShellSnapshot();
++        const projectIds = new Map(
++          shell.projects.map((project) => [project.workspaceRoot, project.id]),
++        );
++        const bindings = yield* directory.listBindings();
++        const sessions = yield* providers.listSessions();
++        for (const native of candidates) {
++          if (disabled.has(native.id)) continue;
++          yield* Effect.gen(function* () {
++            const existingBinding = bindings.find(
++              (binding) =>
++                binding.providerInstanceId === instanceId &&
++                typeof binding.resumeCursor === "object" &&
++                binding.resumeCursor !== null &&
++                "threadId" in binding.resumeCursor &&
++                binding.resumeCursor.threadId === native.id,
++            );
++            const threadId =
++              existingBinding?.threadId ?? ThreadId.make(`shared:${environmentKey}:${native.id}`);
++            const existing = yield* snapshots.getThreadShellById(threadId);
++            if (Option.isSome(existing) && existing.value.archivedAt !== null) return;
++            if (Option.isNone(existing)) {
++              const saved = (yield* snapshots.getCommandReadModel()).threads.find(
++                (thread) => thread.id === threadId,
++              );
++              if (saved?.deletedAt) return;
++            }
++            const live = sessions.find(
++              (session) =>
++                session.threadId === threadId &&
++                (session.status === "ready" || session.status === "running"),
++            );
++            if (live) return;
++            if (Option.isSome(existing) && !shouldAttachSharedThread(existingBinding, native))
++              return;
++            const now = DateTime.formatIso(yield* DateTime.now);
++            const existingProjectId = projectIds.get(native.cwd);
++            const projectId =
++              existingProjectId ??
++              ProjectId.make(
++                `shared:${environmentKey}:${Buffer.from(
++                  yield* crypto.digest("SHA-256", new TextEncoder().encode(native.cwd)),
++                )
++                  .toString("hex")
++                  .slice(0, 16)}`,
++              );
++            if (!existingProjectId) {
++              yield* engine.dispatch({
++                type: "project.create",
++                commandId: yield* commandId,
++                projectId,
++                title: native.cwd.split("/").findLast(Boolean) ?? "Shared Codex",
++                workspaceRoot: native.cwd,
++                createdAt: now,
++              });
++              projectIds.set(native.cwd, projectId);
++            }
++            if (Option.isNone(existing)) {
++              yield* directory.upsert(
++                {
++                  threadId,
++                  provider: ProviderDriverKind.make("codex"),
++                  providerInstanceId: instanceId,
++                  status: "stopped",
++                  resumeCursor: { threadId: native.id },
++                  runtimeMode: "approval-required",
++                  runtimePayload: { cwd: native.cwd },
++                },
++                { onConflict: "ignore" },
++              );
++              yield* engine.dispatch({
++                type: "thread.create",
++                commandId: yield* commandId,
++                threadId,
++                projectId,
++                title: (native.name ?? native.preview.slice(0, 100)) || "Shared Codex",
++                modelSelection: { instanceId, model: native.model ?? "unknown" },
++                runtimeMode: "approval-required",
++                interactionMode: "default",
++                branch: null,
++                worktreePath: null,
++                createdAt: now,
++                historyImport: true,
++              });
++            }
++            const before = yield* client.raw
++              .request("thread/read", { threadId: native.id, includeTurns: true })
++              .pipe(Effect.flatMap(decodeThread));
++            for (const message of nativeMessages(threadId, before.thread)) {
++              yield* engine.dispatch({
++                type: "thread.message.observe",
++                commandId: yield* commandId,
++                ...message,
++              });
++            }
++            yield* providers.startSession(threadId, {
++              threadId,
++              provider: ProviderDriverKind.make("codex"),
++              providerInstanceId: instanceId,
++              cwd: native.cwd,
++              runtimeMode: "approval-required",
++              resumeCursor: { threadId: native.id },
++              modelSelection: { instanceId, model: native.model ?? "unknown" },
++            });
++            const after = yield* client.raw
++              .request("thread/read", { threadId: native.id, includeTurns: true })
++              .pipe(Effect.flatMap(decodeThread));
++            for (const message of nativeMessages(threadId, after.thread)) {
++              yield* engine.dispatch({
++                type: "thread.message.observe",
++                commandId: yield* commandId,
++                ...message,
++              });
++            }
++          }).pipe(
++            Effect.catch((cause) =>
++              Effect.logWarning("Shared Codex conversation could not be synchronized", {
++                nativeThreadId: native.id,
++                cause,
++              }),
++            ),
++          );
++        }
++      });
++      yield* synchronize.pipe(Effect.repeat(Schedule.spaced("2 seconds")));
++    }),
++  );
++  yield* connection.pipe(
++    Effect.catch((cause) =>
++      Effect.logWarning("Shared Codex discovery disconnected; retrying", { cause }),
++    ),
++    Effect.repeat(Schedule.spaced("5 seconds")),
++    Effect.forkScoped,
++  );
++});
+diff --git a/apps/server/src/provider/sharedCodex.ts b/apps/server/src/provider/sharedCodex.ts
+new file mode 100644
+index 000000000..d5b748513
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodex.ts
+@@ -0,0 +1,3 @@
++export function sharedCodexSocket(instanceId: string): string | undefined {
++  return instanceId === "codex" ? process.env.T3_CODEX_SHARED_SOCKET || undefined : undefined;
++}
+diff --git a/apps/server/src/provider/sharedCodexBenchmark.test.ts b/apps/server/src/provider/sharedCodexBenchmark.test.ts
+new file mode 100644
+index 000000000..3d4528753
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexBenchmark.test.ts
+@@ -0,0 +1,63 @@
++// @effect-diagnostics nodeBuiltinImport:off - Exercises benchmark behavior against actual Unix WebSocket peers.
++import * as NodeFSP from "node:fs/promises";
++import * as NodeHttp from "node:http";
++import { NodeWS } from "@effect/platform-node/NodeSocket";
++import { expect, it } from "vite-plus/test";
++import { benchmarkSharedCodex } from "./sharedCodexBenchmark.ts";
++
++it("measures direct and relayed reads without resuming sessions or retaining history", async () => {
++  const directory = await NodeFSP.mkdtemp("/tmp/t3-benchmark-");
++  const http = NodeHttp.createServer();
++  const server = new NodeWS.WebSocketServer({ server: http });
++  const methods: string[] = [];
++  server.on("connection", (peer) =>
++    peer.on("message", (data) => {
++      const request = JSON.parse(data.toString());
++      methods.push(request.method);
++      if (request.id !== undefined)
++        peer.send(
++          JSON.stringify({
++            id: request.id,
++            result:
++              request.method === "initialize"
++                ? {}
++                : { thread: { id: "test", secret: "private-transcript" } },
++          }),
++        );
++    }),
++  );
++  await new Promise<void>((resolve) => http.listen(directory + "/native.sock", resolve));
++  try {
++    const result = await benchmarkSharedCodex({
++      socketPath: directory + "/native.sock",
++      threadId: "test",
++      samples: 3,
++    });
++    expect(result.direct.samples).toBe(3);
++    expect(result.relayed.samples).toBe(3);
++    expect(result.direct.responseBytes).toBeGreaterThan(0);
++    expect(result.direct.p95Ms).toBeGreaterThanOrEqual(result.direct.p50Ms);
++    expect(methods.filter((method) => method === "thread/read")).toHaveLength(8);
++    expect(new Set(methods)).toEqual(new Set(["initialize", "initialized", "thread/read"]));
++    expect(JSON.stringify(result)).not.toContain("private-transcript");
++    expect(http.listening).toBe(true);
++  } finally {
++    for (const peer of server.clients) peer.terminate();
++    server.close();
++    http.close();
++    await NodeFSP.rm(directory, { recursive: true, force: true });
++  }
++});
++
++it("fails rather than publishing a successful report when connection fails", async () => {
++  await expect(
++    benchmarkSharedCodex({
++      socketPath: "/tmp/t3-benchmark-missing.sock",
++      threadId: "test",
++      samples: 1,
++    }),
++  ).rejects.toBeDefined();
++  await expect(
++    benchmarkSharedCodex({ socketPath: "/tmp/unused", threadId: "test", samples: 0 }),
++  ).rejects.toThrow("samples");
++});
+diff --git a/apps/server/src/provider/sharedCodexBenchmark.ts b/apps/server/src/provider/sharedCodexBenchmark.ts
+new file mode 100644
+index 000000000..47f2daec4
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexBenchmark.ts
+@@ -0,0 +1,91 @@
++// @effect-diagnostics nodeBuiltinImport:off - Maintainer benchmark uses a monotonic high-resolution clock.
++import * as NodePerfHooks from "node:perf_hooks";
++import * as Effect from "effect/Effect";
++import * as Schema from "effect/Schema";
++import * as Layer from "effect/Layer";
++import * as CodexClient from "effect-codex-app-server/client";
++import { makeSharedCodexTransport } from "./Layers/codexSharedTransport.ts";
++import { startTerminalRelay } from "./sharedCodexTerminalRelay.ts";
++
++const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
++
++export async function benchmarkSharedCodex(options: {
++  socketPath: string;
++  threadId: string;
++  samples: number;
++}) {
++  if (!Number.isInteger(options.samples) || options.samples < 1 || options.samples > 200)
++    throw new Error("Benchmark samples must be an integer between 1 and 200");
++  if (!options.threadId) throw new Error("An explicit benchmark thread is required");
++  const measure = (socketPath: string) =>
++    Effect.runPromise(
++      Effect.scoped(
++        Effect.gen(function* () {
++          const started = NodePerfHooks.performance.now();
++          const transport = yield* makeSharedCodexTransport(socketPath);
++          const context = yield* Layer.build(
++            CodexClient.layerStdio(transport.stdio, {}, transport.terminationError),
++          );
++          const client = yield* CodexClient.CodexAppServerClient.pipe(Effect.provide(context));
++          yield* client.raw.request("initialize", {
++            clientInfo: { name: "t3_shared_benchmark", version: "0.1.0" },
++            capabilities: { experimentalApi: true },
++          });
++          yield* client.raw.notify("initialized");
++          const initializeMs = NodePerfHooks.performance.now() - started;
++          const timings: number[] = [];
++          let responseBytes = 0;
++          for (let index = 0; index < options.samples + 1; index += 1) {
++            const before = NodePerfHooks.performance.now();
++            const response = yield* client.raw.request("thread/read", {
++              threadId: options.threadId,
++              includeTurns: true,
++            });
++            const elapsed = NodePerfHooks.performance.now() - before;
++            if (index === 0) {
++              responseBytes = Buffer.byteLength(yield* encodeJson(response));
++              continue;
++            }
++            timings.push(elapsed);
++          }
++          timings.sort((a, b) => a - b);
++          return {
++            initializeMs,
++            samples: timings.length,
++            responseBytes,
++            p50Ms: timings[Math.ceil(timings.length * 0.5) - 1]!,
++            p95Ms: timings[Math.ceil(timings.length * 0.95) - 1]!,
++            maxMs: timings.at(-1)!,
++          };
++        }),
++      ).pipe(Effect.timeout("60 seconds")),
++    );
++  const direct = await measure(options.socketPath);
++  const errors: string[] = [];
++  const relay = await startTerminalRelay({
++    upstreamSocket: options.socketPath,
++    onState: () => {},
++    onError: (error) => errors.push(error.message),
++  });
++  try {
++    const relayed = await measure(relay.socketPath);
++    if (errors.length) throw new Error(`Relay benchmark failed: ${errors.join("; ")}`);
++    return {
++      measurement:
++        "Sequential warm native thread/read including history; one warm-up excluded. No model turn or phone-network measurement.",
++      direct,
++      relayed,
++    };
++  } finally {
++    await relay.close();
++  }
++}
++
++if (import.meta.main) {
++  const result = await benchmarkSharedCodex({
++    socketPath: process.env.T3_CODEX_SHARED_SOCKET ?? "",
++    threadId: process.env.T3_CODEX_BENCHMARK_THREAD ?? "",
++    samples: Number(process.env.T3_CODEX_BENCHMARK_SAMPLES ?? "30"),
++  });
++  process.stdout.write(JSON.stringify(result, null, 2) + "\n");
++}
+diff --git a/apps/server/src/provider/sharedCodexLaunch.test.ts b/apps/server/src/provider/sharedCodexLaunch.test.ts
+new file mode 100644
+index 000000000..6feba6272
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexLaunch.test.ts
+@@ -0,0 +1,30 @@
++import { describe, expect, it } from "vite-plus/test";
++import { sharedLaunchArgs } from "./sharedCodexLaunch.ts";
++
++describe("everyday Codex routing", () => {
++  it("preserves native utilities, automation, and explicit remote connections", () => {
++    for (const args of [
++      ["exec", "task"],
++      ["-p", "fast", "review"],
++      ["app-server", "daemon", "start"],
++      ["--version"],
++      ["--remote=unix://", "resume"],
++    ])
++      expect(sharedLaunchArgs(args, "/project")).toBeNull();
++  });
++  it("uses the terminal directory for new sessions while retaining arguments exactly", () => {
++    expect(sharedLaunchArgs(["-p", "fast", "fix this"], "/a b")).toEqual([
++      "-C",
++      "/a b",
++      "-p",
++      "fast",
++      "fix this",
++    ]);
++    expect(sharedLaunchArgs(["--", "exec"], "/a b")).toEqual(["-C", "/a b", "--", "exec"]);
++    expect(sharedLaunchArgs(["--cd=/other"], "/project")).toEqual(["--cd=/other"]);
++  });
++  it("does not overwrite a resumed or forked conversation's directory", () => {
++    expect(sharedLaunchArgs(["resume", "native-id"], "/other")).toEqual(["resume", "native-id"]);
++    expect(sharedLaunchArgs(["fork", "--last"], "/other")).toEqual(["fork", "--last"]);
++  });
++});
+diff --git a/apps/server/src/provider/sharedCodexLaunch.ts b/apps/server/src/provider/sharedCodexLaunch.ts
+new file mode 100644
+index 000000000..88caa1ee3
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexLaunch.ts
+@@ -0,0 +1,78 @@
++const localCommands = new Set([
++  "exec",
++  "e",
++  "review",
++  "login",
++  "logout",
++  "mcp",
++  "plugin",
++  "app-server",
++  "remote-control",
++  "app",
++  "completion",
++  "update",
++  "doctor",
++  "sandbox",
++  "debug",
++  "apply",
++  "a",
++  "queue",
++  "archive",
++  "delete",
++  "migrate-rollouts",
++  "unarchive",
++  "cloud",
++  "exec-server",
++  "features",
++  "help",
++  "agents",
++]);
++const valueOptions = new Set([
++  "-c",
++  "--config",
++  "--enable",
++  "--disable",
++  "-i",
++  "--image",
++  "-m",
++  "--model",
++  "--local-provider",
++  "-p",
++  "--profile",
++  "-s",
++  "--sandbox",
++  "-C",
++  "--cd",
++  "--add-dir",
++  "-a",
++  "--ask-for-approval",
++  "--remote-auth-token-env",
++]);
++
++export function sharedLaunchArgs(args: string[], cwd: string): string[] | null {
++  let command: string | undefined;
++  let hasDirectory = false;
++  for (let index = 0; index < args.length; index += 1) {
++    const arg = args[index]!;
++    if (arg === "--") break;
++    if (
++      ["--help", "-h", "--version", "-V", "--remote"].includes(arg) ||
++      arg.startsWith("--remote=")
++    )
++      return null;
++    if (
++      arg === "-C" ||
++      arg === "--cd" ||
++      arg.startsWith("--cd=") ||
++      (arg.startsWith("-C") && arg.length > 2)
++    )
++      hasDirectory = true;
++    if (valueOptions.has(arg)) {
++      index += 1;
++      continue;
++    }
++    if (!arg.startsWith("-") && command === undefined) command = arg;
++  }
++  if (command && localCommands.has(command)) return null;
++  return hasDirectory || command === "resume" || command === "fork" ? args : ["-C", cwd, ...args];
++}
+diff --git a/apps/server/src/provider/sharedCodexRegistration.test.ts b/apps/server/src/provider/sharedCodexRegistration.test.ts
+new file mode 100644
+index 000000000..1739ded8f
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexRegistration.test.ts
+@@ -0,0 +1,51 @@
++// @effect-diagnostics nodeBuiltinImport:off - Exercises the real filesystem registration boundary.
++import * as NodeFSP from "node:fs/promises";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++import { describe, expect, it } from "vite-plus/test";
++import {
++  registerSharedThread,
++  registeredSharedThreads,
++  unshareThread,
++  unsharedThreads,
++} from "./sharedCodexRegistration.ts";
++
++describe("shared thread registration", () => {
++  it("disables discovery until explicitly registered again", async () => {
++    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-unshare-"));
++    try {
++      await registerSharedThread(directory, "session-one");
++      await unshareThread(directory, "session-one");
++      expect(await registeredSharedThreads(directory)).toEqual([]);
++      expect(await unsharedThreads(directory)).toEqual(["session-one"]);
++      await unshareThread(directory, "session-one");
++      await expect(unshareThread(directory, "../escape")).rejects.toThrow("identity");
++      await registerSharedThread(directory, "session-one");
++      expect(await unsharedThreads(directory)).toEqual([]);
++      expect(await registeredSharedThreads(directory)).toEqual(["session-one"]);
++    } finally {
++      await NodeFSP.rm(directory, { recursive: true, force: true });
++    }
++  });
++  it("persists concurrent registrations without importing unrelated files", async () => {
++    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-registration-"));
++    try {
++      await Promise.all([
++        registerSharedThread(directory, "thread-one"),
++        registerSharedThread(directory, "thread-two"),
++      ]);
++      await registerSharedThread(directory, "thread-one");
++      await NodeFSP.writeFile(NodePath.join(directory, "unrelated"), "ignore");
++      expect((await registeredSharedThreads(directory)).sort()).toEqual([
++        "thread-one",
++        "thread-two",
++      ]);
++      expect((await NodeFSP.stat(NodePath.join(directory, "thread-one.thread"))).mode & 0o777).toBe(
++        0o600,
++      );
++      await expect(registerSharedThread(directory, "../escape")).rejects.toThrow("identity");
++    } finally {
++      await NodeFSP.rm(directory, { recursive: true, force: true });
++    }
++  });
++});
+diff --git a/apps/server/src/provider/sharedCodexRegistration.ts b/apps/server/src/provider/sharedCodexRegistration.ts
+new file mode 100644
+index 000000000..bb07a3e84
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexRegistration.ts
+@@ -0,0 +1,40 @@
++// @effect-diagnostics nodeBuiltinImport:off - Local launcher registration boundary.
++import * as NodeFSP from "node:fs/promises";
++import * as NodePath from "node:path";
++
++const threadIdentity = /^[a-zA-Z0-9_-]+$/;
++export async function registerSharedThread(directory: string, threadId: string) {
++  if (!NodePath.isAbsolute(directory))
++    throw new Error("Shared registration directory must be absolute");
++  if (!threadIdentity.test(threadId)) throw new Error("Invalid native thread identity");
++  await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
++  await NodeFSP.rm(NodePath.join(directory, threadId + ".unshared"), { force: true });
++  await NodeFSP.writeFile(NodePath.join(directory, threadId + ".thread"), "", { mode: 0o600 });
++}
++
++export async function registeredSharedThreads(directory: string) {
++  if (!NodePath.isAbsolute(directory))
++    throw new Error("Shared registration directory must be absolute");
++  return (await NodeFSP.readdir(directory)).flatMap((name) => {
++    const id = name.endsWith(".thread") ? name.slice(0, -7) : "";
++    return threadIdentity.test(id) ? [id] : [];
++  });
++}
++
++export async function unshareThread(directory: string, threadId: string) {
++  if (!NodePath.isAbsolute(directory))
++    throw new Error("Shared registration directory must be absolute");
++  if (!threadIdentity.test(threadId)) throw new Error("Invalid native thread identity");
++  await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
++  await NodeFSP.writeFile(NodePath.join(directory, threadId + ".unshared"), "", { mode: 0o600 });
++  await NodeFSP.rm(NodePath.join(directory, threadId + ".thread"), { force: true });
++}
++
++export async function unsharedThreads(directory: string) {
++  if (!NodePath.isAbsolute(directory))
++    throw new Error("Shared registration directory must be absolute");
++  return (await NodeFSP.readdir(directory)).flatMap((name) => {
++    const id = name.endsWith(".unshared") ? name.slice(0, -9) : "";
++    return threadIdentity.test(id) ? [id] : [];
++  });
++}
+diff --git a/apps/server/src/provider/sharedCodexTerminalRelay.test.ts b/apps/server/src/provider/sharedCodexTerminalRelay.test.ts
+new file mode 100644
+index 000000000..5dfff790b
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexTerminalRelay.test.ts
+@@ -0,0 +1,267 @@
++// @effect-diagnostics nodeBuiltinImport:off - exercises actual local WebSocket peers.
++import * as NodeFSP from "node:fs/promises";
++import * as NodeHttp from "node:http";
++import { NodeWS } from "@effect/platform-node/NodeSocket";
++import { expect, it } from "vite-plus/test";
++import { startTerminalRelay } from "./sharedCodexTerminalRelay.ts";
++import type { TerminalObservation } from "./sharedCodexTerminalState.ts";
++
++it("forwards unchanged frames, captures actual identity, and detaches without answering approvals", async () => {
++  const directory = await NodeFSP.mkdtemp("/tmp/t3-relay-test-");
++  const upstreamSocket = directory + "/native.sock";
++  const http = NodeHttp.createServer();
++  const server = new NodeWS.WebSocketServer({ server: http });
++  const received: string[] = [];
++  let native: InstanceType<typeof NodeWS.WebSocket> | undefined;
++  const nativeClosed = new Promise<void>((resolve) =>
++    server.on("connection", (peer, request) => {
++      native = peer;
++      expect(request.headers["sec-websocket-extensions"]).toBeUndefined();
++      peer.on("close", () => resolve());
++      peer.on("message", (data) => {
++        received.push(data.toString());
++        peer.send('{"id":7,"result":{"thread":{"id":"native-7","status":{"type":"idle"}}}}');
++      });
++    }),
++  );
++  await new Promise<void>((resolve) => http.listen(upstreamSocket, resolve));
++  const states: Array<TerminalObservation | null> = [];
++  const errors: Error[] = [];
++  const relay = await startTerminalRelay({
++    upstreamSocket,
++    onState: (state) => states.push(state),
++    onError: (error) => errors.push(error),
++  });
++  const terminal = new NodeWS.WebSocket(`ws+unix://${relay.socketPath}:/`, {
++    perMessageDeflate: false,
++  });
++  try {
++    await new Promise<void>((resolve, reject) => {
++      terminal.once("open", resolve);
++      terminal.once("error", reject);
++    });
++    const response = new Promise<string>((resolve) =>
++      terminal.once("message", (data) => resolve(data.toString())),
++    );
++    const frame =
++      '{ "id":7, "method":"thread/resume", "params":{"threadId":"native-7","unknownFutureField":"héllo"} }';
++    terminal.send(frame);
++    expect(await response).toContain('"native-7"');
++    expect(received).toEqual([frame]);
++    expect(states.at(-1)).toMatchObject({ nativeThreadId: "native-7", state: "idle" });
++    const approval = new Promise<void>((resolve) => terminal.once("message", () => resolve()));
++    native!.send(
++      '{"id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"native-7","turnId":"turn-7"}}',
++    );
++    await approval;
++    expect(states.at(-1)?.state).toBe("waiting");
++    terminal.close();
++    await nativeClosed;
++    expect(received).toEqual([frame]);
++    expect(states.at(-1)?.state).toBe("unknown");
++    expect(errors).toEqual([]);
++    expect(http.listening).toBe(true);
++  } finally {
++    terminal.terminate();
++    await relay.close();
++    for (const peer of server.clients) peer.terminate();
++    server.close();
++    http.close();
++    await NodeFSP.rm(directory, { recursive: true, force: true });
++  }
++});
++
++it("allows an auxiliary picker connection without replacing the terminal identity", async () => {
++  const directory = await NodeFSP.mkdtemp("/tmp/t3-picker-test-");
++  const http = NodeHttp.createServer();
++  const server = new NodeWS.WebSocketServer({ server: http });
++  server.on("connection", (peer) =>
++    peer.on("message", (data) => {
++      const request = JSON.parse(data.toString());
++      peer.send(
++        JSON.stringify({
++          id: request.id,
++          result:
++            request.method === "thread/resume"
++              ? { thread: { id: request.params.threadId, status: { type: "idle" } } }
++              : { data: [] },
++        }),
++      );
++    }),
++  );
++  await new Promise<void>((resolve) => http.listen(directory + "/native.sock", resolve));
++  const states: Array<TerminalObservation | null> = [];
++  const relay = await startTerminalRelay({
++    upstreamSocket: directory + "/native.sock",
++    onState: (state) => states.push(state),
++    onError: () => {},
++  });
++  const clients: Array<InstanceType<typeof NodeWS.WebSocket>> = [];
++  async function client() {
++    const peer = new NodeWS.WebSocket(`ws+unix://${relay.socketPath}:/`, {
++      perMessageDeflate: false,
++    });
++    clients.push(peer);
++    await new Promise<void>((resolve, reject) => {
++      peer.once("open", resolve);
++      peer.once("error", reject);
++    });
++    return peer;
++  }
++  async function request(
++    peer: InstanceType<typeof NodeWS.WebSocket>,
++    method: string,
++    threadId?: string,
++  ) {
++    const reply = new Promise<void>((resolve, reject) => {
++      peer.once("message", () => resolve());
++      peer.once("close", () => reject(new Error("relay rejected concurrent client")));
++    });
++    peer.send(JSON.stringify({ id: 1, method, params: { threadId } }));
++    await reply;
++  }
++  try {
++    const terminal = await client();
++    await request(terminal, "thread/resume", "original");
++    const picker = await client();
++    await request(picker, "thread/list");
++    expect(states.at(-1)).toMatchObject({ nativeThreadId: "original", state: "idle" });
++    picker.close();
++    await request(terminal, "thread/resume", "selected");
++    expect(states.at(-1)).toMatchObject({ nativeThreadId: "selected", state: "idle" });
++  } finally {
++    for (const peer of clients) peer.terminate();
++    await relay.close();
++    for (const peer of server.clients) peer.terminate();
++    server.close();
++    http.close();
++    await NodeFSP.rm(directory, { recursive: true, force: true });
++  }
++});
++
++it("preserves large Unicode and binary frames under streaming backpressure and drains shutdown", async () => {
++  const directory = await NodeFSP.mkdtemp("/tmp/t3-stream-test-");
++  const http = NodeHttp.createServer();
++  const server = new NodeWS.WebSocketServer({ server: http });
++  server.on("connection", (peer) =>
++    peer.on("message", (data, binary) => peer.send(data, { binary })),
++  );
++  await new Promise<void>((resolve) => http.listen(directory + "/native.sock", resolve));
++  const errors: Error[] = [];
++  const relay = await startTerminalRelay({
++    upstreamSocket: directory + "/native.sock",
++    onState: () => {},
++    onError: (error) => errors.push(error),
++  });
++  const terminal = new NodeWS.WebSocket(`ws+unix://${relay.socketPath}:/`, {
++    perMessageDeflate: false,
++  });
++  let relayClosed = false;
++  try {
++    await new Promise<void>((resolve, reject) => {
++      terminal.once("open", resolve);
++      terminal.once("error", reject);
++    });
++    const frames = Array.from({ length: 40 }, (_, index) =>
++      Buffer.from(JSON.stringify({ id: index, text: "こんにちは 🧪 café".repeat(2000) })),
++    );
++    const received: Buffer[] = [];
++    const complete = new Promise<void>((resolve, reject) => {
++      terminal.on("message", (data, binary) => {
++        expect(binary).toBe(received.length % 2 === 0);
++        received.push(Buffer.from(data as Buffer));
++        if (received.length === frames.length) resolve();
++      });
++      terminal.once("error", reject);
++    });
++    frames.forEach((frame, index) => terminal.send(frame, { binary: index % 2 === 0 }));
++    await complete;
++    expect(received).toEqual(frames);
++    await relay.close();
++    relayClosed = true;
++    expect(errors).toEqual([]);
++    expect(http.listening).toBe(true);
++  } finally {
++    terminal.terminate();
++    if (!relayClosed) await relay.close();
++    for (const peer of server.clients) peer.terminate();
++    server.close();
++    http.close();
++    await NodeFSP.rm(directory, { recursive: true, force: true });
++  }
++});
++
++it("disconnects a lost upstream and permits explicit recovery without replaying a pending approval", async () => {
++  const directory = await NodeFSP.mkdtemp("/tmp/t3-recovery-test-");
++  const http = NodeHttp.createServer();
++  const server = new NodeWS.WebSocketServer({ server: http });
++  const nativePeers: Array<InstanceType<typeof NodeWS.WebSocket>> = [];
++  const received: string[][] = [];
++  server.on("connection", (peer) => {
++    nativePeers.push(peer);
++    const frames: string[] = [];
++    received.push(frames);
++    peer.on("message", (data) => {
++      frames.push(data.toString());
++      const request = JSON.parse(data.toString());
++      peer.send(
++        JSON.stringify({
++          id: request.id,
++          result: { thread: { id: request.params.threadId, status: { type: "idle" } } },
++        }),
++      );
++    });
++  });
++  await new Promise<void>((resolve) => http.listen(directory + "/native.sock", resolve));
++  const states: Array<TerminalObservation | null> = [];
++  const errors: Error[] = [];
++  const relay = await startTerminalRelay({
++    upstreamSocket: directory + "/native.sock",
++    onState: (state) => states.push(state),
++    onError: (error) => errors.push(error),
++  });
++  const clients: Array<InstanceType<typeof NodeWS.WebSocket>> = [];
++  async function resume() {
++    const peer = new NodeWS.WebSocket(`ws+unix://${relay.socketPath}:/`, {
++      perMessageDeflate: false,
++    });
++    clients.push(peer);
++    await new Promise<void>((resolve, reject) => {
++      peer.once("open", resolve);
++      peer.once("error", reject);
++    });
++    const response = new Promise<void>((resolve) => peer.once("message", () => resolve()));
++    peer.send('{"id":1,"method":"thread/resume","params":{"threadId":"retained"}}');
++    await response;
++    return peer;
++  }
++  try {
++    const terminal = await resume();
++    const approvalReceived = new Promise<void>((resolve) =>
++      terminal.once("message", () => resolve()),
++    );
++    nativePeers[0]!.send(
++      '{"id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"retained","turnId":"pending"}}',
++    );
++    await approvalReceived;
++    expect(states.at(-1)?.state).toBe("waiting");
++    const disconnected = new Promise<void>((resolve) => terminal.once("close", () => resolve()));
++    nativePeers[0]!.terminate();
++    await disconnected;
++    expect(states.at(-1)).toMatchObject({ nativeThreadId: "retained", state: "unknown" });
++    await resume();
++    expect(states.at(-1)).toMatchObject({ nativeThreadId: "retained", state: "idle" });
++    expect(received).toEqual([
++      ['{"id":1,"method":"thread/resume","params":{"threadId":"retained"}}'],
++      ['{"id":1,"method":"thread/resume","params":{"threadId":"retained"}}'],
++    ]);
++    expect(errors).toEqual([]);
++  } finally {
++    for (const peer of clients) peer.terminate();
++    await relay.close();
++    for (const peer of server.clients) peer.terminate();
++    server.close();
++    http.close();
++    await NodeFSP.rm(directory, { recursive: true, force: true });
++  }
++});
+diff --git a/apps/server/src/provider/sharedCodexTerminalRelay.ts b/apps/server/src/provider/sharedCodexTerminalRelay.ts
+new file mode 100644
+index 000000000..f5ee62f46
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexTerminalRelay.ts
+@@ -0,0 +1,120 @@
++// @effect-diagnostics nodeBuiltinImport:off - native CLI WebSocket boundary.
++import * as NodeFSP from "node:fs/promises";
++import * as NodeHttp from "node:http";
++import * as NodePath from "node:path";
++import { NodeWS } from "@effect/platform-node/NodeSocket";
++import { makeTerminalObserver, type TerminalObservation } from "./sharedCodexTerminalState.ts";
++
++export async function startTerminalRelay(options: {
++  upstreamSocket: string;
++  onState: (state: TerminalObservation | null) => void;
++  onError: (error: Error) => void;
++}) {
++  if (!options.upstreamSocket.startsWith("/") || /[:?#]/.test(options.upstreamSocket)) {
++    throw new Error("Expected an absolute native Unix socket path without URL delimiters.");
++  }
++  const directory = await NodeFSP.mkdtemp("/tmp/t3-codex-terminal-");
++  await NodeFSP.chmod(directory, 0o700);
++  const socketPath = NodePath.join(directory, "rpc.sock");
++  const http = NodeHttp.createServer();
++  const server = new NodeWS.WebSocketServer({ server: http, perMessageDeflate: false });
++  const peers = new Set<InstanceType<typeof NodeWS.WebSocket>>();
++  let owner: ReturnType<typeof makeTerminalObserver> | undefined;
++  server.on("connection", (terminal) => {
++    const observer = makeTerminalObserver();
++    let closing = false;
++    const native = new NodeWS.WebSocket(`ws+unix://${options.upstreamSocket}:/`, {
++      perMessageDeflate: false,
++      handshakeTimeout: 5000,
++    });
++    peers.add(terminal);
++    peers.add(native);
++    terminal.pause();
++    const close = () => {
++      if (closing) return;
++      closing = true;
++      observer.disconnect();
++      if (owner === observer) options.onState(observer.state());
++      peers.delete(terminal);
++      peers.delete(native);
++      terminal.terminate();
++      native.terminate();
++    };
++    for (const peer of [terminal, native]) {
++      peer.on("close", close);
++      peer.on("error", (error) => {
++        if (!closing) options.onError(error);
++        close();
++      });
++    }
++    function forward(
++      source: InstanceType<typeof NodeWS.WebSocket>,
++      target: InstanceType<typeof NodeWS.WebSocket>,
++      incoming: boolean,
++    ) {
++      source.on("message", (data, binary) => {
++        if (closing) return;
++        if (!binary) {
++          try {
++            const frame: unknown = JSON.parse(data.toString());
++            const previous = observer.state();
++            if (incoming) observer.receive(frame);
++            else observer.send(frame);
++            const current = observer.state();
++            if (current && current.nativeThreadId !== previous?.nativeThreadId) owner = observer;
++            if (owner === observer) options.onState(current);
++          } catch {
++            options.onError(new Error("Unable to observe native frame; forwarding it unchanged"));
++          }
++        }
++        source.pause();
++        target.send(data, { binary }, (error) => {
++          if (error) {
++            options.onError(error);
++            close();
++          } else if (!closing) source.resume();
++        });
++      });
++    }
++    forward(terminal, native, false);
++    forward(native, terminal, true);
++    native.once("open", () => {
++      if (!closing) terminal.resume();
++    });
++  });
++  try {
++    await new Promise<void>((resolve, reject) => {
++      http.once("error", reject);
++      http.listen(socketPath, resolve);
++    });
++    await NodeFSP.chmod(socketPath, 0o600);
++  } catch (error) {
++    server.close();
++    http.close();
++    await NodeFSP.rm(directory, { recursive: true, force: true });
++    throw error;
++  }
++  return {
++    socketPath,
++    async close() {
++      await Promise.all(
++        [...peers].map(
++          (peer) =>
++            new Promise<void>((resolve) => {
++              if (peer.readyState === NodeWS.WebSocket.CLOSED) {
++                resolve();
++                return;
++              }
++              peer.once("close", () => resolve());
++              peer.terminate();
++            }),
++        ),
++      );
++      server.close();
++      await new Promise<void>((resolve, reject) =>
++        http.close((error) => (error ? reject(error) : resolve())),
++      );
++      await NodeFSP.rm(directory, { recursive: true, force: true });
++    },
++  };
++}
+diff --git a/apps/server/src/provider/sharedCodexTerminalState.test.ts b/apps/server/src/provider/sharedCodexTerminalState.test.ts
+new file mode 100644
+index 000000000..03e251d06
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexTerminalState.test.ts
+@@ -0,0 +1,80 @@
++import { describe, expect, it } from "vite-plus/test";
++import { makeTerminalObserver } from "./sharedCodexTerminalState.ts";
++
++describe("shared terminal identity", () => {
++  it("ignores native ephemeral helper sessions on the terminal connection", () => {
++    const observer = makeTerminalObserver();
++    observer.send({ id: 1, method: "thread/start" });
++    observer.receive({ id: 1, result: { thread: { id: "conversation" } } });
++    observer.send({ id: 2, method: "thread/start", params: { ephemeral: true } });
++    observer.receive({ id: 2, result: { thread: { id: "helper", ephemeral: true } } });
++    expect(observer.state()?.nativeThreadId).toBe("conversation");
++  });
++  it("binds only successful replies to this terminal's open requests and follows session switches", () => {
++    const observer = makeTerminalObserver();
++    observer.receive({ method: "thread/started", params: { thread: { id: "foreign" } } });
++    expect(observer.state()).toBeNull();
++    observer.send({ id: 1, method: "thread/start" });
++    observer.receive({ id: 1, result: { thread: { id: "new", status: { type: "idle" } } } });
++    expect(observer.state()).toMatchObject({ nativeThreadId: "new", state: "idle" });
++    observer.send({ id: 2, method: "thread/resume" });
++    observer.receive({ id: 2, error: { message: "unavailable" } });
++    expect(observer.state()?.nativeThreadId).toBe("new");
++    observer.send({ id: 3, method: "thread/resume" });
++    observer.receive({
++      id: 3,
++      result: {
++        thread: { id: "resumed", status: { type: "active", activeFlags: ["waitingOnApproval"] } },
++      },
++    });
++    expect(observer.state()).toMatchObject({ nativeThreadId: "resumed", state: "waiting" });
++    observer.receive({
++      method: "turn/completed",
++      params: { threadId: "new", turn: { id: "old", status: "completed" } },
++    });
++    expect(observer.state()?.state).toBe("waiting");
++  });
++
++  it("tracks phone turns and approvals without retaining prompt or tool content", () => {
++    const observer = makeTerminalObserver();
++    observer.send({ id: "open", method: "thread/resume", params: { secret: "do not retain" } });
++    observer.receive({
++      id: "open",
++      result: { thread: { id: "native", status: { type: "idle" } } },
++    });
++    observer.receive({
++      method: "turn/started",
++      params: { threadId: "native", turn: { id: "turn" } },
++    });
++    expect(observer.state()?.state).toBe("working");
++    observer.receive({
++      id: 0,
++      method: "item/commandExecution/requestApproval",
++      params: { threadId: "native", turnId: "turn", command: "private" },
++    });
++    expect(observer.state()?.state).toBe("waiting");
++    observer.receive({
++      method: "serverRequest/resolved",
++      params: { threadId: "native", requestId: 0 },
++    });
++    expect(observer.state()?.state).toBe("working");
++    observer.receive({
++      method: "turn/completed",
++      params: { threadId: "native", turn: { id: "stale", status: "completed" } },
++    });
++    expect(observer.state()?.state).toBe("working");
++    observer.receive({
++      method: "turn/completed",
++      params: { threadId: "native", turn: { id: "turn", status: "completed" } },
++    });
++    observer.receive({
++      method: "thread/status/changed",
++      params: { threadId: "native", status: { type: "idle" } },
++    });
++    expect(observer.state()).toMatchObject({ state: "done", turnId: "turn" });
++    expect(JSON.stringify(observer.state())).not.toContain("private");
++    expect(JSON.stringify(observer.state())).not.toContain("do not retain");
++    observer.disconnect();
++    expect(observer.state()?.state).toBe("unknown");
++  });
++});
+diff --git a/apps/server/src/provider/sharedCodexTerminalState.ts b/apps/server/src/provider/sharedCodexTerminalState.ts
+new file mode 100644
+index 000000000..48cdbe2bb
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexTerminalState.ts
+@@ -0,0 +1,122 @@
++import * as Option from "effect/Option";
++import * as Schema from "effect/Schema";
++
++const Identity = Schema.Union([Schema.String, Schema.Number]);
++const Status = Schema.Struct({
++  type: Schema.String,
++  activeFlags: Schema.optionalKey(Schema.Array(Schema.String)),
++});
++const decodeFrame = Schema.decodeUnknownOption(
++  Schema.Struct({
++    id: Schema.optionalKey(Identity),
++    method: Schema.optionalKey(Schema.String),
++    result: Schema.optionalKey(
++      Schema.Struct({
++        thread: Schema.optionalKey(
++          Schema.Struct({
++            id: Schema.String,
++            status: Schema.optionalKey(Status),
++            ephemeral: Schema.optionalKey(Schema.Boolean),
++          }),
++        ),
++      }),
++    ),
++    params: Schema.optionalKey(
++      Schema.Struct({
++        threadId: Schema.optionalKey(Schema.String),
++        turnId: Schema.optionalKey(Schema.String),
++        requestId: Schema.optionalKey(Identity),
++        status: Schema.optionalKey(Status),
++        turn: Schema.optionalKey(
++          Schema.Struct({ id: Schema.String, status: Schema.optionalKey(Schema.String) }),
++        ),
++      }),
++    ),
++  }),
++);
++
++export interface TerminalObservation {
++  nativeThreadId: string;
++  state: "idle" | "working" | "waiting" | "done" | "unknown";
++  turnId: string | null;
++}
++
++export function makeTerminalObserver() {
++  const opens = new Set<string | number>();
++  const approvals = new Set<string | number>();
++  let current: TerminalObservation | null = null;
++  function applyStatus(status: typeof Status.Type) {
++    if (!current) return;
++    if (status.type === "active")
++      current.state = status.activeFlags?.length ? "waiting" : "working";
++    else if (status.type === "idle") {
++      if (current.state !== "done") current.state = "idle";
++    } else current.state = "unknown";
++  }
++  return {
++    state: () => (current ? { ...current } : null),
++    send(value: unknown) {
++      const frame = Option.getOrUndefined(decodeFrame(value));
++      if (
++        frame?.id !== undefined &&
++        ["thread/start", "thread/resume", "thread/fork"].includes(frame.method ?? "")
++      )
++        opens.add(frame.id);
++    },
++    receive(value: unknown) {
++      const frame = Option.getOrUndefined(decodeFrame(value));
++      if (!frame) return;
++      if (
++        !frame.method &&
++        frame.id !== undefined &&
++        opens.delete(frame.id) &&
++        frame.result?.thread &&
++        !frame.result.thread.ephemeral
++      ) {
++        current = { nativeThreadId: frame.result.thread.id, state: "unknown", turnId: null };
++        approvals.clear();
++        if (frame.result.thread.status) applyStatus(frame.result.thread.status);
++        return;
++      }
++      if (!current || frame.params?.threadId !== current.nativeThreadId) return;
++      const params = frame.params;
++      if (frame.method === "turn/started" && params.turn) {
++        current.turnId = params.turn.id;
++        current.state = "working";
++        approvals.clear();
++      } else if (
++        frame.method === "turn/completed" &&
++        params.turn &&
++        (!current.turnId || current.turnId === params.turn.id)
++      ) {
++        current.turnId = params.turn.id;
++        current.state = params.turn.status === "interrupted" ? "idle" : "done";
++        approvals.clear();
++      } else if (
++        frame.id !== undefined &&
++        [
++          "item/commandExecution/requestApproval",
++          "item/fileChange/requestApproval",
++          "item/tool/requestUserInput",
++          "mcpServer/elicitation/request",
++        ].includes(frame.method ?? "")
++      ) {
++        if (params.turnId && current.turnId && params.turnId !== current.turnId) return;
++        approvals.add(frame.id);
++        current.state = "waiting";
++      } else if (
++        frame.method === "serverRequest/resolved" &&
++        params.requestId !== undefined &&
++        approvals.delete(params.requestId)
++      ) {
++        current.state = approvals.size ? "waiting" : "working";
++      } else if (frame.method === "thread/status/changed" && params.status)
++        applyStatus(params.status);
++    },
++    disconnect() {
++      opens.clear();
++      approvals.clear();
++      if (current) current.state = "unknown";
++    },
++  };
++}
+diff --git a/apps/server/src/serverRuntimeStartup.reconcile.test.ts b/apps/server/src/serverRuntimeStartup.reconcile.test.ts
+index 37fd210ee..3e9e6fed2 100644
+--- a/apps/server/src/serverRuntimeStartup.reconcile.test.ts
++++ b/apps/server/src/serverRuntimeStartup.reconcile.test.ts
+@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+ import * as Option from "effect/Option";
+ import * as Stream from "effect/Stream";
++import { vi } from "vite-plus/test";
+ 
+ import { OrchestrationCommandInvariantError } from "./orchestration/Errors.ts";
+ import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+@@ -115,6 +116,25 @@ const runReconciliation = (input: {
+     ),
+   );
+ 
++it.effect("leaves shared daemon turns to discovery without injecting restart prompts", () =>
++  Effect.gen(function* () {
++    vi.stubEnv("T3_CODEX_SHARED_SOCKET", "/tmp/shared-codex.sock");
++    yield* runReconciliation({
++      threads: [makeThread("shared-active", "running", TurnId.make("native-active"))],
++      continueAfterRestart: true,
++      directory: {
++        getBinding: () => Effect.die("must not recover a shared turn"),
++        upsert: () => Effect.die("must not mark a shared turn"),
++        recordImportedTranscript: () => Effect.die("unused"),
++        getProvider: () => Effect.die("unused"),
++        listThreadIds: () => Effect.die("unused"),
++        listBindings: () => Effect.succeed([]),
++      },
++      dispatch: () => Effect.die("must not inject or settle a shared turn"),
++    });
++  }).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs()))),
++);
++
+ it.effect("marks active running sessions that have persisted resume state", () => {
+   const active = makeThread("thread-mark-active", "running", TurnId.make("turn-mark-active"));
+   const archived = makeThread(
+diff --git a/apps/server/src/serverRuntimeStartup.ts b/apps/server/src/serverRuntimeStartup.ts
+index 090543925..20a804d4b 100644
+--- a/apps/server/src/serverRuntimeStartup.ts
++++ b/apps/server/src/serverRuntimeStartup.ts
+@@ -1,3 +1,5 @@
++import { startSharedCodexDiscovery } from "./provider/SharedCodexDiscovery.ts";
++import { sharedCodexSocket } from "./provider/sharedCodex.ts";
+ import {
+   CommandId,
+   DEFAULT_MODEL,
+@@ -524,6 +526,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
+   const orphanedThreads = threads.filter(
+     (thread) =>
+       thread.session !== null &&
++      !sharedCodexSocket(thread.session.providerInstanceId ?? thread.modelSelection.instanceId) &&
+       (thread.session.status === "starting" ||
+         thread.session.status === "running" ||
+         thread.session.activeTurnId !== null ||
+@@ -981,6 +984,7 @@ export const make = (options?: StartupOptions) =>
+           },
+         }),
+       );
++      yield* startSharedCodexDiscovery().pipe(Scope.provide(reactorScope));
+       yield* Effect.logDebug("startup phase: complete");
+     }).pipe(
+       Effect.annotateSpans({
+diff --git a/apps/server/src/sharedCodexTerminal.ts b/apps/server/src/sharedCodexTerminal.ts
+new file mode 100644
+index 000000000..b50edd0f7
+--- /dev/null
++++ b/apps/server/src/sharedCodexTerminal.ts
+@@ -0,0 +1,94 @@
++// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off - Interactive Node launcher owns the child, diagnostic timestamps, and reporting heartbeat.
++import * as NodeChildProcess from "node:child_process";
++import * as NodeFS from "node:fs";
++import * as NodeOS from "node:os";
++import * as NodePath from "node:path";
++import * as NodeTimers from "node:timers";
++import { startTerminalRelay } from "./provider/sharedCodexTerminalRelay.ts";
++import { sharedLaunchArgs } from "./provider/sharedCodexLaunch.ts";
++import { registerSharedThread, unshareThread } from "./provider/sharedCodexRegistration.ts";
++import type { TerminalObservation } from "./provider/sharedCodexTerminalState.ts";
++
++const nativeBinary = process.env.T3_CODEX_BINARY ?? "codex";
++const originalArgs = process.argv.slice(2);
++if (originalArgs[0] === "unshare") {
++  const directory = process.env.T3_CODEX_SHARED_REGISTRATIONS;
++  if (!directory || originalArgs.length !== 2)
++    throw new Error("Usage: bridge codex unshare <session-id>");
++  await unshareThread(directory, originalArgs[1]!);
++  process.stdout.write(
++    "Sharing disabled. T3 will detach on its next discovery sweep; saved history is retained.\n",
++  );
++  process.exit(0);
++}
++const args = sharedLaunchArgs(originalArgs, process.cwd());
++if (!args || !process.stdin.isTTY || !process.stdout.isTTY) {
++  const result = NodeChildProcess.spawnSync(nativeBinary, originalArgs, { stdio: "inherit" });
++  if (result.error) throw result.error;
++  process.exit(result.status ?? 1);
++}
++const upstreamSocket = process.env.T3_CODEX_SHARED_SOCKET;
++if (!upstreamSocket)
++  throw new Error("T3_CODEX_SHARED_SOCKET must identify the native daemon socket.");
++const logDirectory = NodePath.join(NodeOS.homedir(), ".local", "state", "t3-codex-bridge");
++NodeFS.mkdirSync(logDirectory, { recursive: true, mode: 0o700 });
++const logPath = NodePath.join(logDirectory, "terminal.log");
++const logFd = NodeFS.openSync(logPath, "a", 0o600);
++let diagnosticCount = 0;
++function diagnostic(message: string) {
++  NodeFS.writeSync(
++    logFd,
++    JSON.stringify({ time: new Date().toISOString(), pid: process.pid, message }) + "\n",
++  );
++  diagnosticCount += 1;
++}
++const registrationDirectory = process.env.T3_CODEX_SHARED_REGISTRATIONS;
++const registrations = new Map<string, Promise<void>>();
++function register(state: TerminalObservation | null) {
++  if (!registrationDirectory || !state || registrations.has(state.nativeThreadId)) return;
++  const id = state.nativeThreadId;
++  registrations.set(
++    id,
++    registerSharedThread(registrationDirectory, id).catch((error) => {
++      registrations.delete(id);
++      diagnostic(`T3 session registration failed: ${String(error)}`);
++    }),
++  );
++}
++let latest: TerminalObservation | null = null;
++const relay = await startTerminalRelay({
++  upstreamSocket,
++  onState(state) {
++    register(state);
++    latest = state;
++  },
++  onError(error) {
++    diagnostic(`Shared Codex connection: ${error.message}`);
++  },
++});
++const heartbeat = NodeTimers.setInterval(() => {
++  register(latest);
++}, 2000);
++const child = NodeChildProcess.spawn(
++  nativeBinary,
++  ["--remote", "unix://" + relay.socketPath, "--no-alt-screen", ...args],
++  { stdio: "inherit" },
++);
++process.on("SIGTERM", () => child.kill("SIGTERM"));
++try {
++  process.exitCode = await new Promise<number>((resolve, reject) => {
++    child.once("error", reject);
++    child.once("exit", (code) => resolve(code ?? 1));
++  });
++} finally {
++  NodeTimers.clearInterval(heartbeat);
++  await relay.close();
++  await Promise.all(registrations.values());
++  NodeFS.closeSync(logFd);
++  if (diagnosticCount) process.stderr.write(`\nShared Codex diagnostics: ${logPath}\n`);
++  const finalState = latest as TerminalObservation | null;
++  if (finalState)
++    process.stderr.write(
++      `\nResume this shared conversation: bridge codex resume ${finalState.nativeThreadId}\n`,
++    );
++}
+diff --git a/packages/contracts/src/orchestration.ts b/packages/contracts/src/orchestration.ts
+index da4eac53d..d27ad2607 100644
+--- a/packages/contracts/src/orchestration.ts
++++ b/packages/contracts/src/orchestration.ts
+@@ -1165,6 +1165,18 @@ const ThreadHistoryImportCommand = Schema.Struct({
+   ).check(Schema.isNonEmpty()),
+ });
+ 
++const ThreadMessageObserveCommand = Schema.Struct({
++  type: Schema.Literal("thread.message.observe"),
++  commandId: CommandId,
++  threadId: ThreadId,
++  messageId: MessageId,
++  clientMessageId: Schema.optional(MessageId),
++  turnId: TurnId,
++  role: Schema.Literals(["user", "assistant"]),
++  text: Schema.String,
++  createdAt: IsoDateTime,
++});
++
+ const ThreadProposedPlanUpsertCommand = Schema.Struct({
+   type: Schema.Literal("thread.proposed-plan.upsert"),
+   commandId: CommandId,
+@@ -1234,6 +1246,7 @@ const InternalOrchestrationCommand = Schema.Union([
+   ThreadMessageAssistantDeltaCommand,
+   ThreadMessageAssistantCompleteCommand,
+   ThreadHistoryImportCommand,
++  ThreadMessageObserveCommand,
+   ThreadProposedPlanUpsertCommand,
+   ThreadTurnDiffCompleteCommand,
+   ThreadActivityAppendCommand,
+diff --git a/packages/contracts/src/provider.ts b/packages/contracts/src/provider.ts
+index 3f9570a30..0f4deacab 100644
+--- a/packages/contracts/src/provider.ts
++++ b/packages/contracts/src/provider.ts
+@@ -67,6 +67,7 @@ export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
+ 
+ export const ProviderSendTurnInput = Schema.Struct({
+   threadId: ThreadId,
++  clientUserMessageId: Schema.optional(TrimmedNonEmptyString),
+   /** Internal recovery signal. Allows an empty turn only for adapters that
+       explicitly support promptless continuation. */
+   continuation: Schema.optional(Schema.Boolean),
+diff --git a/packages/effect-codex-app-server/src/client.test.ts b/packages/effect-codex-app-server/src/client.test.ts
+index 3830c5fc5..d1c476a8d 100644
+--- a/packages/effect-codex-app-server/src/client.test.ts
++++ b/packages/effect-codex-app-server/src/client.test.ts
+@@ -32,6 +32,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
+   it.effect("initializes, handles typed server requests, and reads account and skills data", () =>
+     Effect.gen(function* () {
+       const userInputRequests = yield* Ref.make<Array<unknown>>([]);
++      const requestIds = yield* Ref.make<Array<string | number>>([]);
+       const messageDeltas = yield* Ref.make<Array<unknown>>([]);
+       const handle = yield* makeHandle();
+       const scope = yield* Scope.make();
+@@ -41,8 +42,9 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
+       const result = yield* Effect.gen(function* () {
+         const client = yield* CodexClient.CodexAppServerClient;
+ 
+-        yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
++        yield* client.handleServerRequest("item/tool/requestUserInput", (payload, requestId) =>
+           Ref.update(userInputRequests, (current) => [...current, payload]).pipe(
++            Effect.andThen(Ref.update(requestIds, (current) => [...current, requestId])),
+             Effect.as({
+               answers: {
+                 approved: {
+@@ -93,6 +95,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
+       }).pipe(Effect.provide(context), Effect.ensuring(Scope.close(scope, Exit.void)));
+ 
+       assert.equal(result.skills.data[0]?.skills.length, 0);
++      assert.deepEqual(yield* Ref.get(requestIds), [10_000]);
+       assert.deepEqual(yield* Ref.get(userInputRequests), [
+         {
+           itemId: "item-approval-1",
+diff --git a/packages/effect-codex-app-server/src/client.ts b/packages/effect-codex-app-server/src/client.ts
+index 78d719626..c927be19c 100644
+--- a/packages/effect-codex-app-server/src/client.ts
++++ b/packages/effect-codex-app-server/src/client.ts
+@@ -51,6 +51,7 @@ export class CodexAppServerClient extends Context.Service<
+       method: M,
+       handler: (
+         payload: CodexRpc.ServerRequestParamsByMethod[M],
++        requestId: string | number,
+       ) => Effect.Effect<
+         CodexRpc.ServerRequestResponsesByMethod[M],
+         CodexError.CodexAppServerError
+@@ -79,6 +80,7 @@ export class CodexAppServerClient extends Context.Service<
+ 
+ type ServerRequestHandler = (
+   payload: unknown,
++  requestId: string | number,
+ ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
+ type ServerNotificationHandler = (
+   payload: unknown,
+@@ -174,7 +176,13 @@ const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(func
+       const handler = requestHandlers.get(method);
+ 
+       return decodeOptionalPayload(method, payloadSchema, request.params).pipe(
+-        Effect.flatMap((decoded) => runHandler(handler, decoded, method)),
++        Effect.flatMap((decoded) =>
++          runHandler(
++            handler ? (payload) => handler(payload, request.id) : undefined,
++            decoded,
++            method,
++          ),
++        ),
+         Effect.flatMap((result) => encodeOptionalPayload(method, responseSchema, result)),
+       );
+     }
+@@ -256,6 +264,13 @@ export const layerChildProcess = (
+ ): Layer.Layer<CodexAppServerClient> =>
+   Layer.effect(CodexAppServerClient, makeChildProcessClient(handle, options));
+ 
++export const layerStdio = (
++  stdio: Stdio.Stdio,
++  options: CodexAppServerClientOptions = {},
++  terminationError?: Effect.Effect<CodexError.CodexAppServerError>,
++): Layer.Layer<CodexAppServerClient> =>
++  Layer.effect(CodexAppServerClient, make(stdio, options, terminationError));
++
+ const makeChildProcessClient = Effect.fn(
+   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
+ )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
+diff --git a/packages/effect-codex-app-server/src/errors.ts b/packages/effect-codex-app-server/src/errors.ts
+index f0bf470c2..39e761277 100644
+--- a/packages/effect-codex-app-server/src/errors.ts
++++ b/packages/effect-codex-app-server/src/errors.ts
+@@ -108,6 +108,8 @@ export const CodexAppServerProtocolParseOperation = Schema.Literals([
+ export type CodexAppServerProtocolParseOperation = typeof CodexAppServerProtocolParseOperation.Type;
+ 
+ export const CodexAppServerTransportOperation = Schema.Literals([
++  "connect-shared-socket",
++  "check-sharing",
+   "read-input-stream",
+   "read-process-exit-status",
+ ]);

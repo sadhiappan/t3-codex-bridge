@@ -1,0 +1,7 @@
+{
+  "upstream": "https://github.com/pingdotgg/t3code.git",
+  "commit": "09e8de9c655ae85410bf6b00446f272a01da81c7",
+  "codex": "0.154.0",
+  "pnpm": "11.10.0",
+  "node": "24.13.1"
+}

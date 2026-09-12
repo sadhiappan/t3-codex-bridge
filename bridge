@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ulimit -Sn 10240 || { echo 'Cannot raise file limit to 10240. See README troubleshooting.' >&2; exit 1; }
+export T3_BRIDGE_FILE_LIMIT="$(ulimit -Sn)"
+ROOT="$(cd -- "$(dirname -- "$0")" && pwd)"
+exec node "$ROOT/scripts/bridge.mjs" "$@"

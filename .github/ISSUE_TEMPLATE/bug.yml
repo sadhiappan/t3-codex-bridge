@@ -1,0 +1,28 @@
+name: Tester bug report
+description: Report a reproducible alpha issue; redact secrets.
+title: "[Bug] "
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, terminal, Node/Codex versions, release, and whether a shared daemon was already running. Do not paste environment variables or credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Short error excerpts or screenshots. Never attach pairing tokens, auth files or conversation databases.

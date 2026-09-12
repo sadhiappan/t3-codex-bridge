@@ -1,0 +1,21 @@
+name: Validate tester install
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  install:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.13.1
+      - run: npm test
+      - run: ./bridge setup
+      - run: .runtime/t3/node_modules/.bin/tsgo --noEmit -p .runtime/t3/apps/server/tsconfig.json
+      - run: ./scripts/test-upstream.sh
+      - run: node .runtime/t3/apps/server/dist/bin.mjs --help
+      - run: node scripts/smoke.mjs

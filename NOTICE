@@ -1,0 +1,5 @@
+T3 Codex Bridge is an independent companion project.
+The shared-codex.patch modifies T3 Code, copyright (c) 2026 T3 Tools Inc., licensed under MIT.
+The installer fetches upstream T3 Code and preserves its license and notices.
+OpenAI Codex is a separately downloaded npm dependency with its own license.
+T3 and OpenAI names identify compatibility; neither organization endorses this project.
