@@ -8,11 +8,13 @@ import { spawnSync } from 'node:child_process';
 import { configuration, socketReady, root } from '../scripts/bridge.mjs';
 
 test('dedicated T3 state and opt-in registration override ambient discovery settings', () => {
-  const result = configuration({ PATH: '/custom/bin', T3CODE_HOME: '/existing-t3', T3_CODEX_SHARED_PROJECTS: '["/all"]' }, '/tester');
+  const result = configuration({ PATH: '/custom/bin', T3CODE_HOME: '/existing-t3', T3_CODEX_SHARED_PROJECTS: '["/all"]', VITE_DEV_SERVER_URL: 'http://localhost:9999', T3CODE_TAILSCALE_SERVE: 'true' }, '/tester');
   assert.equal(result.env.CODEX_HOME, '/tester/.codex');
   assert.equal(result.env.T3CODE_HOME, '/tester/.local/share/t3-codex-bridge/t3');
   assert.equal(result.env.T3_CODEX_SHARED_PROJECTS, '[]');
   assert.equal(result.env.T3_CODEX_START_DAEMON, '0');
+  assert.equal(result.env.VITE_DEV_SERVER_URL, undefined);
+  assert.equal(result.env.T3CODE_TAILSCALE_SERVE, 'false');
   assert.ok(result.env.PATH.endsWith(':/custom/bin'));
 });
 test('custom isolated Codex home controls socket and preserves arguments with spaces', () => {

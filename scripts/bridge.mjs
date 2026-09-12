@@ -13,6 +13,8 @@ const source = join(runtime, 't3');
 const binary = join(runtime, 'codex', 'node_modules', '.bin', 'codex');
 const patch = join(root, 'shared-codex.patch');
 const stamp = join(runtime, 'installed.json');
+const productionEnvironment = { VITE_DEV_SERVER_URL: undefined, VITE_HTTP_URL: undefined,
+  VITE_WS_URL: undefined, T3CODE_TAILSCALE_SERVE: 'false' };
 
 export function configuration(env = process.env, home = homedir()) {
   const codexHome = resolve(env.CODEX_HOME || join(home, '.codex'));
@@ -21,7 +23,7 @@ export function configuration(env = process.env, home = homedir()) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('T3_BRIDGE_PORT must be 1024–65535.');
   return {
     data, port, codexHome,
-    env: { ...env, CODEX_HOME: codexHome, T3CODE_HOME: join(data, 't3'),
+    env: { ...env, ...productionEnvironment, CODEX_HOME: codexHome, T3CODE_HOME: join(data, 't3'),
       T3_CODEX_BINARY: binary,
       T3_CODEX_SHARED_SOCKET: join(codexHome, 'app-server-control', 'app-server-control.sock'),
       T3_CODEX_SHARED_PROJECTS: '[]', T3_CODEX_SHARED_REGISTRATIONS: join(data, 'registrations'),
@@ -88,7 +90,7 @@ export async function main(args = process.argv.slice(2)) {
   ./bridge codex unshare <id>       Detach it from T3; preserve history
   ./bridge doctor                  Check installation and socket reachability
 
-No command restarts/stops your daemon or edits shell/Codex configuration.`);
+No automatic daemon restarts/stops or shell/Codex configuration edits.`);
     return;
   }
   checkNode();
@@ -110,7 +112,7 @@ No command restarts/stops your daemon or edits shell/Codex configuration.`);
       run('git', ['apply', '--check', patch], { cwd: source });
       run('git', ['apply', patch], { cwd: source });
     }
-    const setupEnv = { ...process.env, npm_config_cache: join(runtime, 'npm-cache'),
+    const setupEnv = { ...process.env, ...productionEnvironment, npm_config_cache: join(runtime, 'npm-cache'),
       npm_config_store_dir: join(runtime, 'pnpm-store'), XDG_CACHE_HOME: join(runtime, 'cache') };
     run('npm', ['install', '--prefix', join(runtime, 'codex'), '--no-save', '--no-audit', '--no-fund', `@openai/codex@${versions.codex}`], { env: setupEnv });
     run('npx', ['--yes', `pnpm@${versions.pnpm}`, 'install', '--frozen-lockfile'], { cwd: source, env: setupEnv });

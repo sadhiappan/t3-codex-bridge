@@ -48,7 +48,7 @@ Leave the last command running. It serves the built web app on `127.0.0.1:18773`
 
 ## 3. Pair your phone
 
-In a second Mac terminal:
+In a second Mac terminal (also using Node 24; repeat the Homebrew PATH export above if needed):
 
 ```bash
 cd "$HOME/t3-codex-bridge"
