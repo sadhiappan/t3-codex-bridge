@@ -15,7 +15,7 @@ const portServer = createServer();
 await new Promise((resolve) => portServer.listen(0, '127.0.0.1', resolve));
 const port = portServer.address().port;
 await new Promise((resolve) => portServer.close(resolve));
-const config = configuration({ ...process.env, CODEX_HOME: join(directory, 'codex'), T3_BRIDGE_HOME: join(directory, 'data'), T3_BRIDGE_PORT: String(port) });
+const config = configuration({ ...process.env, CODEX_HOME: join(directory, 'codex'), T3_BRIDGE_HOME: join(directory, 'data'), T3_BRIDGE_PORT: String(port), T3_BRIDGE_HOST: '127.0.0.1' });
 mkdirSync(join(config.codexHome, 'app-server-control'), { recursive: true, mode: 0o700 });
 const children = [];
 function launch(command, args) {

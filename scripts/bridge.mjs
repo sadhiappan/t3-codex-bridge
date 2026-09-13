@@ -20,9 +20,10 @@ export function configuration(env = process.env, home = homedir()) {
   const codexHome = resolve(env.CODEX_HOME || join(home, '.codex'));
   const data = resolve(env.T3_BRIDGE_HOME || join(home, '.local', 'share', 't3-codex-bridge'));
   const port = Number(env.T3_BRIDGE_PORT || 18773);
+  const host = env.T3_BRIDGE_HOST || '127.0.0.1';
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('T3_BRIDGE_PORT must be 1024–65535.');
   return {
-    data, port, codexHome,
+    data, port, host, codexHome,
     env: { ...env, ...productionEnvironment, CODEX_HOME: codexHome, T3CODE_HOME: join(data, 't3'),
       T3_CODEX_BINARY: binary,
       T3_CODEX_SHARED_SOCKET: join(codexHome, 'app-server-control', 'app-server-control.sock'),
@@ -158,7 +159,7 @@ No automatic daemon restarts/stops or shell/Codex configuration edits.`);
   if (rest.length) throw new Error('serve takes no arguments. Set T3_BRIDGE_PORT to choose a local port.');
   if (!await socketReady(config.env.T3_CODEX_SHARED_SOCKET)) throw new Error('Daemon is not reachable. Start it explicitly with ./bridge daemon-start.');
   await forward(process.execPath, [server, 'serve', '--base-dir', config.env.T3CODE_HOME,
-    '--host', '127.0.0.1', '--port', String(config.port), '--no-browser'], config.env);
+    '--host', config.host, '--port', String(config.port), '--no-browser'], config.env);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => { console.error(`Bridge: ${error.message}`); process.exitCode = 1; });

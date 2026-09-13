@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
@@ -16,12 +16,14 @@ test('dedicated T3 state and opt-in registration override ambient discovery sett
   assert.equal(result.env.VITE_DEV_SERVER_URL, undefined);
   assert.equal(result.env.T3CODE_TAILSCALE_SERVE, 'false');
   assert.ok(result.env.PATH.endsWith(':/custom/bin'));
+  assert.equal(result.host, '127.0.0.1');
 });
 test('custom isolated Codex home controls socket and preserves arguments with spaces', () => {
-  const result = configuration({ CODEX_HOME: '/tmp/codex test', T3_BRIDGE_HOME: '/tmp/t3 test', T3_BRIDGE_PORT: '18774' });
+  const result = configuration({ CODEX_HOME: '/tmp/codex test', T3_BRIDGE_HOME: '/tmp/t3 test', T3_BRIDGE_PORT: '18774', T3_BRIDGE_HOST: '192.0.2.10' });
   assert.equal(result.env.T3_CODEX_SHARED_SOCKET, '/tmp/codex test/app-server-control/app-server-control.sock');
   assert.equal(result.env.T3CODE_HOME, '/tmp/t3 test/t3');
   assert.equal(result.port, 18774);
+  assert.equal(result.host, '192.0.2.10');
 });
 test('invalid ports fail before starting a process', () => {
   for (const value of ['0', '80', '65536', 'bad', '18773.5'])
@@ -47,4 +49,18 @@ test('help runs without an installation and lists opt-in commands', () => {
 test('public patch contains no hardware bridge or personal host paths', () => {
   const patch = readFileSync(join(root, 'shared-codex.patch'), 'utf8');
   assert.doesNotMatch(patch, /microRequest|codex-micro|sharedCodexMicroClient|\/Users\/|\.ts\.net/);
+});
+test('shell launcher resolves absolute and relative symlinks from another directory', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'bridge links '));
+  try {
+    const absoluteLink = join(directory, 'absolute bridge');
+    const relativeLink = join(directory, 'relative bridge');
+    symlinkSync(join(root, 'bridge'), absoluteLink);
+    symlinkSync('absolute bridge', relativeLink);
+    for (const launcher of [absoluteLink, relativeLink]) {
+      const result = spawnSync(launcher, ['--help'], { cwd: directory, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /codex resume/);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });

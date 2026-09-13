@@ -104,6 +104,7 @@ Use a disposable project first. Follow [TESTING.md](TESTING.md), then file a [bu
 - Codex authentication/history/config: existing `~/.codex`, or your explicit `CODEX_HOME`.
 - Terminal diagnostic log: `~/.local/state/t3-codex-bridge/terminal.log`.
 - Set `T3_BRIDGE_HOME` for a different T3 data directory or `T3_BRIDGE_PORT` for a different local port; use consistent settings for `serve`, `pair`, and `codex`.
+- Set `T3_BRIDGE_HOST` to bind an existing LAN address for direct phone access. The default is `127.0.0.1`; pairing authentication still applies when using a LAN address.
 
 Run `./bridge doctor`. Socket reachability alone does **not** prove MCPs or prompts work: open a real session, verify enabled MCP servers connect, and complete a small prompt.
 
