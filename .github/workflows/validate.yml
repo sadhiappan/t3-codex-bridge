@@ -26,6 +26,7 @@ jobs:
           T3_BRIDGE_STRESS: '1'
       - run: go vet ./cmd/... ./internal/...
       - run: ./scripts/build-go.sh
+      - run: python3 -m unittest discover -s tests -p 'test_t3_toggle.py'
       - run: npm test
       - run: ./bin/bridge setup
       - run: .runtime/t3/node_modules/.bin/tsgo --noEmit -p .runtime/t3/apps/server/tsconfig.json
