@@ -105,7 +105,7 @@ func (c Config) Terminal(ctx context.Context, args []string, log *Log) error {
 					mu.Lock()
 					delete(pending, id)
 					mu.Unlock()
-					log.Emit("session_registered")
+					log.EmitSession("session_registered", id)
 				}
 			}
 		}

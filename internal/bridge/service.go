@@ -38,6 +38,9 @@ func (c Config) ServicePlist() []byte {
 	value("key", "EnvironmentVariables")
 	out.WriteString("<dict>")
 	env := map[string]string{"PATH": filepath.Dir(c.Node) + ":" + filepath.Dir(c.Codex) + ":" + os.Getenv("PATH"), "CODEX_HOME": c.CodexHome, "T3_BRIDGE_HOME": c.Data, "T3_BRIDGE_HOST": c.Host, "T3_BRIDGE_PORT": fmt.Sprint(c.Port)}
+	if endpoint := os.Getenv("T3_BRIDGE_OTLP_METRICS_URL"); endpoint != "" {
+		env["T3_BRIDGE_OTLP_METRICS_URL"] = endpoint
+	}
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -66,6 +69,11 @@ func (c Config) Service(ctx context.Context, action string) error {
 	}
 	switch action {
 	case "install":
+		if endpoint := os.Getenv("T3_BRIDGE_OTLP_METRICS_URL"); endpoint != "" {
+			if err := ValidateMetricsURL(endpoint); err != nil {
+				return err
+			}
+		}
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
 		}

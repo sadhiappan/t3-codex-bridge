@@ -34,6 +34,7 @@ func TestDiagnosticLogsContainOnlyDeclaredMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	log.Emit("terminal_started")
+	log.EmitSession("session_registered", "session-secret-canary")
 	log.Close()
 	var out bytes.Buffer
 	if err = (Config{Data: dir}).ReadLogs(&out); err != nil {
@@ -42,7 +43,7 @@ func TestDiagnosticLogsContainOnlyDeclaredMetadata(t *testing.T) {
 	if !strings.Contains(out.String(), "terminal_started") {
 		t.Fatal("missing event")
 	}
-	if strings.Contains(out.String(), "HOME") || strings.Contains(out.String(), "PATH") {
+	if strings.Contains(out.String(), "session-secret-canary") || strings.Contains(out.String(), "HOME") || strings.Contains(out.String(), "PATH") {
 		t.Fatal("environment leaked")
 	}
 	entries, _ := os.ReadDir(filepath.Join(dir, "logs"))

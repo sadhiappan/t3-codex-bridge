@@ -79,7 +79,7 @@ No automatic Codex daemon restarts. Micro is not included.`)
 			if c.Node == "" {
 				return fmt.Errorf("source builds require Node 24; prebuilt bundles include it")
 			}
-			if err := RunChild(ctx, c.Node, []string{filepath.Join(root, "scripts/bridge.mjs"), "setup"}, c.Environment(), os.Stdout, os.Stderr); err != nil {
+			if err := RunChild(ctx, c.Node, []string{filepath.Join(root, "scripts/build-runtime.mjs"), "setup"}, c.Environment(), os.Stdout, os.Stderr); err != nil {
 				return err
 			}
 		}
@@ -144,6 +144,11 @@ No automatic Codex daemon restarts. Micro is not included.`)
 			return err
 		}
 		defer log.Close()
+		stopMetrics, err := StartMetrics(ctx, os.Getenv("T3_BRIDGE_OTLP_METRICS_URL"), log)
+		if err != nil {
+			return err
+		}
+		defer stopMetrics()
 		if command == "codex" {
 			return c.Terminal(ctx, rest, log)
 		}

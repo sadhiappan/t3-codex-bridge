@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,9 +19,10 @@ import (
 var logName = regexp.MustCompile(`^bridge-[0-9]+\.jsonl(\.1)?$`)
 
 type Event struct {
-	Time  time.Time `json:"time"`
-	PID   int       `json:"pid"`
-	Event string    `json:"event"`
+	Time    time.Time `json:"time"`
+	PID     int       `json:"pid"`
+	Event   string    `json:"event"`
+	Session string    `json:"session,omitempty"`
 }
 type Log struct {
 	queue   chan Event
@@ -215,4 +217,13 @@ func (c Config) ReadLogs(out io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func (l *Log) EmitSession(event, id string) {
+	record := Event{Time: time.Now().UTC(), PID: os.Getpid(), Event: event, Session: fmt.Sprintf("%x", sha256.Sum256([]byte(id)))[:16]}
+	select {
+	case l.queue <- record:
+	default:
+		l.dropped.Add(1)
+	}
 }

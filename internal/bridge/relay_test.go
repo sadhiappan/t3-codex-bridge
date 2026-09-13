@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 	"github.com/coder/websocket"
 )
 
-func mockNative(t *testing.T, handler func(*websocket.Conn)) string {
+func mockNative(t testing.TB, handler func(*websocket.Conn)) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "native-test-")
 	if err != nil {
@@ -187,4 +188,57 @@ func TestRelayReconnectResourceBound(t *testing.T) {
 		t.Fatalf("descriptor growth: %d -> %d", len(before), len(after))
 	}
 	t.Logf("%d reconnects; descriptors %d -> %d", cycles, len(before), len(after))
+}
+
+func BenchmarkRoundtrip(b *testing.B) {
+	for _, relayed := range []bool{false, true} {
+		name := "direct"
+		if relayed {
+			name = "relay"
+		}
+		b.Run(name, func(b *testing.B) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			socket := mockNative(b, func(c *websocket.Conn) {
+				for {
+					kind, data, err := c.Read(ctx)
+					if err != nil {
+						return
+					}
+					if c.Write(ctx, kind, data) != nil {
+						return
+					}
+				}
+			})
+			if relayed {
+				r, err := StartRelay(ctx, socket, func(string) {}, func(string) {})
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer r.Close()
+				socket = r.Socket
+			}
+			c, err := DialUnix(ctx, socket)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer c.CloseNow()
+			durations := make([]time.Duration, 0, b.N)
+			payload := []byte(`{"id":1,"method":"ping"}`)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				start := time.Now()
+				if err = c.Write(ctx, websocket.MessageText, payload); err != nil {
+					b.Fatal(err)
+				}
+				if _, _, err = c.Read(ctx); err != nil {
+					b.Fatal(err)
+				}
+				durations = append(durations, time.Since(start))
+			}
+			b.StopTimer()
+			sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+			b.ReportMetric(float64(durations[(len(durations)-1)*95/100].Nanoseconds())/1e6, "p95-ms")
+		})
+	}
 }
