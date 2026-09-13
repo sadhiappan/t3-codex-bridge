@@ -10,4 +10,5 @@ cd "$ROOT/.runtime/t3/apps/server"
   src/provider/SharedCodexDiscovery.test.ts \
   src/provider/Layers/codexSharedTransport.test.ts \
   src/provider/Layers/CodexSessionRuntime.test.ts \
+  src/provider/Layers/EventNdjsonLogger.test.ts \
   src/provider/Layers/ProviderSessionReaper.test.ts

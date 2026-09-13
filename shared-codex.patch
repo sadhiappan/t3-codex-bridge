@@ -1,5 +1,17 @@
+diff --git a/apps/server/src/observability/BrowserTraceCollector.ts b/apps/server/src/observability/BrowserTraceCollector.ts
+index 300a50fe..38b95774 100644
+--- a/apps/server/src/observability/BrowserTraceCollector.ts
++++ b/apps/server/src/observability/BrowserTraceCollector.ts
+@@ -14,6 +14,7 @@ export const make = (sink: TraceSink): BrowserTraceCollector["Service"] =>
+   BrowserTraceCollector.of({
+     record: (records) =>
+       Effect.sync(() => {
++        if (process.env.T3_BRIDGE_SAFE_LOGS === "1") return;
+         for (const record of records) {
+           sink.push(record);
+         }
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
-index d4d6b9409..1056b2485 100644
+index d4d6b940..1056b248 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 @@ -1,3 +1,4 @@
@@ -44,7 +56,7 @@ index d4d6b9409..1056b2485 100644
    const processInputSafely = (input: ReactorInput) =>
      processInput(input).pipe(
 diff --git a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
-index 0b2e08c40..bf4c96c7a 100644
+index 0b2e08c4..bf4c96c7 100644
 --- a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
 +++ b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
 @@ -115,6 +115,126 @@ const hasMetricSnapshot = (
@@ -175,7 +187,7 @@ index 0b2e08c40..bf4c96c7a 100644
      "sends async answers with a %s session and rejects old duplicate replies",
      async (status) => {
 diff --git a/apps/server/src/orchestration/Layers/OrchestrationEngine.ts b/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
-index 6557888c3..5c2581fb5 100644
+index 6557888c..5c2581fb 100644
 --- a/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
 +++ b/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
 @@ -2,6 +2,7 @@ import type {
@@ -243,7 +255,7 @@ index 6557888c3..5c2581fb5 100644
                } as const;
              }),
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
-index 5c1086b9e..188c2037c 100644
+index 5c1086b9..188c2037 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 @@ -1441,7 +1441,7 @@ const make = Effect.gen(function* () {
@@ -256,7 +268,7 @@ index 5c1086b9e..188c2037c 100644
    });
  
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-index 8d34fee4f..5332fa021 100644
+index 8d34fee4..5332fa02 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 @@ -26,6 +26,7 @@ import * as Effect from "effect/Effect";
@@ -324,7 +336,7 @@ index 8d34fee4f..5332fa021 100644
        const shouldApplyThreadLifecycle = (() => {
 diff --git a/apps/server/src/orchestration/decider.observe.test.ts b/apps/server/src/orchestration/decider.observe.test.ts
 new file mode 100644
-index 000000000..bb2f26a69
+index 00000000..bb2f26a6
 --- /dev/null
 +++ b/apps/server/src/orchestration/decider.observe.test.ts
 @@ -0,0 +1,78 @@
@@ -407,7 +419,7 @@ index 000000000..bb2f26a69
 +  );
 +});
 diff --git a/apps/server/src/orchestration/decider.ts b/apps/server/src/orchestration/decider.ts
-index b93add311..fb904f1ad 100644
+index b93add31..fb904f1a 100644
 --- a/apps/server/src/orchestration/decider.ts
 +++ b/apps/server/src/orchestration/decider.ts
 @@ -9,6 +9,7 @@ import {
@@ -477,7 +489,7 @@ index b93add311..fb904f1ad 100644
        const thread = yield* requireThread({
          readModel,
 diff --git a/apps/server/src/provider/Layers/CodexAdapter.ts b/apps/server/src/provider/Layers/CodexAdapter.ts
-index 5e2244336..aa70f826b 100644
+index 5e224433..aa70f826 100644
 --- a/apps/server/src/provider/Layers/CodexAdapter.ts
 +++ b/apps/server/src/provider/Layers/CodexAdapter.ts
 @@ -764,6 +764,9 @@ function itemTitle(
@@ -523,14 +535,14 @@ index 5e2244336..aa70f826b 100644
      startSession,
      sendTurn,
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
-index 3385137a2..491efda5f 100644
+index 3385137a..bfce907b 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
-@@ -63,6 +63,23 @@ function makeThreadOpenResponse(
+@@ -63,6 +63,39 @@ function makeThreadOpenResponse(
  }
  
  describe("buildTurnStartParams", () => {
-+  it("inherits native settings for shared turns", () => {
++  it("forwards selected T3 turn settings while retaining native permissions", () => {
 +    const params = Effect.runSync(
 +      buildTurnStartParams({
 +        threadId: "native",
@@ -539,7 +551,23 @@ index 3385137a2..491efda5f 100644
 +        model: "t3-default",
 +        effort: "high",
 +        interactionMode: "default",
-+        preserveNativeSettings: true,
++        preserveNativePermissions: true,
++      }),
++    );
++    NodeAssert.equal(params.model, "t3-default");
++    NodeAssert.equal(params.effort, "high");
++    NodeAssert.equal(params.collaborationMode?.mode, "default");
++    NodeAssert.equal(params.approvalPolicy, undefined);
++    NodeAssert.equal(params.approvalsReviewer, undefined);
++    NodeAssert.equal(params.sandboxPolicy, undefined);
++  });
++  it("does not invent absent shared turn settings", () => {
++    const params = Effect.runSync(
++      buildTurnStartParams({
++        threadId: "native",
++        runtimeMode: "full-access",
++        prompt: "hello",
++        preserveNativePermissions: true,
 +      }),
 +    );
 +    NodeAssert.deepStrictEqual(params, {
@@ -550,7 +578,7 @@ index 3385137a2..491efda5f 100644
    it("keeps invalid turn values only in the schema cause", () => {
      const secret = "codex-turn-input-secret-sentinel";
      const error = Effect.runSync(
-@@ -220,30 +237,30 @@ describe("buildTurnStartParams", () => {
+@@ -220,30 +253,30 @@ describe("buildTurnStartParams", () => {
      }),
    );
  
@@ -600,7 +628,7 @@ index 3385137a2..491efda5f 100644
  });
  
  describe("Codex MCP elicitation approvals", () => {
-@@ -781,6 +798,44 @@ describe("isRecoverableThreadResumeError", () => {
+@@ -781,6 +814,44 @@ describe("isRecoverableThreadResumeError", () => {
  });
  
  describe("openCodexThread", () => {
@@ -646,7 +674,7 @@ index 3385137a2..491efda5f 100644
      Effect.gen(function* () {
        const response = makeThreadOpenResponse("saved-thread");
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
-index 4ee5845e3..180c88282 100644
+index 4ee5845e..cc474220 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 @@ -1,3 +1,4 @@
@@ -691,35 +719,27 @@ index 4ee5845e3..180c88282 100644
    readonly interactionMode?: ProviderInteractionMode;
    /** Defaults to true so callers that predate the agent-access gate are unchanged. */
    readonly browserToolsAvailable?: boolean;
-+  readonly preserveNativeSettings?: boolean;
++  readonly preserveNativePermissions?: boolean;
  }): Effect.Effect<
    CodexTurnStartParamsWithCollaborationMode,
    CodexErrors.CodexAppServerProtocolParseError
-@@ -630,13 +635,17 @@ export function buildTurnStartParams(input: {
+@@ -630,9 +635,13 @@ export function buildTurnStartParams(input: {
    return decodeCodexTurnStartParamsWithCollaborationMode({
      threadId: input.threadId,
      input: turnInput,
 -    approvalPolicy: config.approvalPolicy,
 -    approvalsReviewer: config.approvalsReviewer,
 -    sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
--    ...(input.model ? { model: input.model } : {}),
--    ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
--    ...(input.effort ? { effort: input.effort } : {}),
--    ...(collaborationMode ? { collaborationMode } : {}),
-+    ...(!input.preserveNativeSettings
++    ...(!input.preserveNativePermissions
 +      ? {
 +          approvalPolicy: config.approvalPolicy,
 +          approvalsReviewer: config.approvalsReviewer,
 +          sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
-+          ...(input.model ? { model: input.model } : {}),
-+          ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
-+          ...(input.effort ? { effort: input.effort } : {}),
-+          ...(collaborationMode ? { collaborationMode } : {}),
 +        }
 +      : {}),
-   }).pipe(
-     Effect.mapError((cause) =>
-       CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+     ...(input.model ? { model: input.model } : {}),
+     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+     ...(input.effort ? { effort: input.effort } : {}),
 @@ -709,6 +718,7 @@ export const openCodexThread = (input: {
    readonly requestedModel: string | undefined;
    readonly serviceTier: CodexServiceTier | undefined;
@@ -954,7 +974,7 @@ index 4ee5845e3..180c88282 100644
            });
 -          return next;
 -        });
- 
+-
 -        yield* emitEvent({
 -          kind: "request",
 -          threadId: options.threadId,
@@ -965,7 +985,7 @@ index 4ee5845e3..180c88282 100644
 -          ...(itemId ? { itemId } : {}),
 -          payload,
 -        });
--
+ 
 -        const resolved = yield* Deferred.await(decision).pipe(
 -          Effect.ensuring(
 -            Ref.update(pendingApprovalsRef, (current) => {
@@ -1344,33 +1364,27 @@ index 4ee5845e3..180c88282 100644
            const params = yield* buildTurnStartParams({
              threadId: providerThreadId,
              runtimeMode: options.runtimeMode,
-+            preserveNativeSettings: shared,
++            preserveNativePermissions: shared,
              ...(input.input ? { prompt: input.input } : {}),
              ...(input.attachments ? { attachments: input.attachments } : {}),
              ...(normalizedModel ? { model: normalizedModel } : {}),
-@@ -2354,7 +2522,12 @@ export const makeCodexSessionRuntime = (
+@@ -2352,9 +2520,14 @@ export const makeCodexSessionRuntime = (
+             // Derived from the session's own MCP configuration rather than the
+             // setting, so the prompt describes the tools this turn actually
              // has even if the setting changed after the session started.
-             browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
-           });
--          const rawResponse = yield* client.raw.request("turn/start", params);
+-            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
++            browserToolsAvailable: !shared && hasConfiguredMcpServer(options.appServerArgs),
++          });
 +          const rawResponse = yield* client.raw.request("turn/start", {
 +            ...params,
 +            ...(shared && input.clientUserMessageId
 +              ? { clientUserMessageId: input.clientUserMessageId }
 +              : {}),
-+          });
+           });
+-          const rawResponse = yield* client.raw.request("turn/start", params);
            const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
              Effect.mapError((error) =>
                CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
-@@ -2371,7 +2544,7 @@ export const makeCodexSessionRuntime = (
-             // running. The response contains the queued turn id, but
-             // turn/interrupt only accepts the id that is active now.
-             activeTurnId: session.activeTurnId ?? turnId,
--            ...(normalizedModel ? { model: normalizedModel } : {}),
-+            ...(!shared && normalizedModel ? { model: normalizedModel } : {}),
-           }));
-           const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
-           return {
 @@ -2406,7 +2579,7 @@ export const makeCodexSessionRuntime = (
                  .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
              { concurrency: 8, discard: true },
@@ -1380,9 +1394,104 @@ index 4ee5845e3..180c88282 100644
            if (!effectiveTurnId) {
              return;
            }
+diff --git a/apps/server/src/provider/Layers/EventNdjsonLogger.test.ts b/apps/server/src/provider/Layers/EventNdjsonLogger.test.ts
+index 500f2815..b3255deb 100644
+--- a/apps/server/src/provider/Layers/EventNdjsonLogger.test.ts
++++ b/apps/server/src/provider/Layers/EventNdjsonLogger.test.ts
+@@ -14,6 +14,7 @@ import * as TestClock from "effect/testing/TestClock";
+ 
+ import * as ResourceAttribution from "../../resourceTelemetry/ResourceAttribution.ts";
+ import {
++  providerDiagnosticMetadata,
+   makeEventNdjsonLogger,
+   makeEventNdjsonLogStore,
+   type PendingRecord,
+@@ -685,3 +686,15 @@ describe("EventNdjsonLogger", () => {
+     }),
+   );
+ });
++
++it("shared bridge diagnostics exclude payloads, unknown event names and identifiers", () => {
++  const secret = "prompt-token-secret-canary";
++  const payload = providerDiagnosticMetadata({
++    method: "turn/completed",
++    threadId: secret,
++    payload: { text: secret, token: secret },
++  });
++  assert.equal(payload.event, "turn/completed");
++  assert.notInclude(JSON.stringify(payload), secret);
++  assert.deepEqual(providerDiagnosticMetadata({ method: secret }), { event: "other" });
++});
+diff --git a/apps/server/src/provider/Layers/EventNdjsonLogger.ts b/apps/server/src/provider/Layers/EventNdjsonLogger.ts
+index fd81dbac..45e6b2ea 100644
+--- a/apps/server/src/provider/Layers/EventNdjsonLogger.ts
++++ b/apps/server/src/provider/Layers/EventNdjsonLogger.ts
+@@ -5,6 +5,8 @@
+  * Native and canonical views share batching, rotation, and retention state so
+  * they cannot race while appending to the same thread-scoped file.
+  */
++import * as NodeCrypto from "node:crypto";
++import * as Option from "effect/Option";
+ import * as NodeFS from "node:fs";
+ import * as NodePath from "node:path";
+ 
+@@ -494,8 +496,52 @@ function drainPending(input: {
+   ];
+ }
+ 
++const decodeDiagnosticIdentity = Schema.decodeUnknownOption(
++  Schema.Struct({
++    method: Schema.optionalKey(Schema.String),
++    type: Schema.optionalKey(Schema.String),
++    threadId: Schema.optionalKey(Schema.String),
++  }),
++);
++const diagnosticEvents = new Set([
++  "thread/started",
++  "thread/status/changed",
++  "turn/started",
++  "turn/completed",
++  "session/connecting",
++  "session/ready",
++  "session/exited",
++  "error",
++  "item/commandExecution/requestApproval",
++  "item/fileChange/requestApproval",
++  "item/tool/requestUserInput",
++  "mcpServer/elicitation/request",
++  "serverRequest/resolved",
++  "session.started",
++  "session.exited",
++  "turn.started",
++  "turn.completed",
++]);
++export function providerDiagnosticMetadata(event: unknown) {
++  const identity = Option.getOrUndefined(decodeDiagnosticIdentity(event));
++  const name = identity?.method ?? identity?.type ?? "other";
++  return {
++    event: diagnosticEvents.has(name) ? name : "other",
++    ...(identity?.threadId
++      ? {
++          thread: NodeCrypto.createHash("sha256")
++            .update(identity.threadId)
++            .digest("hex")
++            .slice(0, 16),
++        }
++      : {}),
++  };
++}
++
+ const serializeEvent = Effect.fnUntraced(function* (event: unknown) {
+-  return yield* encodeUnknownJsonString(event).pipe(
++  return yield* encodeUnknownJsonString(
++    process.env.T3_BRIDGE_SAFE_LOGS === "1" ? providerDiagnosticMetadata(event) : event,
++  ).pipe(
+     Effect.catch((error) =>
+       logWarning("failed to serialize provider event log record", {
+         errorTag: errorTag(error),
 diff --git a/apps/server/src/provider/Layers/codexSharedTransport.test.ts b/apps/server/src/provider/Layers/codexSharedTransport.test.ts
 new file mode 100644
-index 000000000..4e92ad2c4
+index 00000000..4e92ad2c
 --- /dev/null
 +++ b/apps/server/src/provider/Layers/codexSharedTransport.test.ts
 @@ -0,0 +1,69 @@
@@ -1457,7 +1566,7 @@ index 000000000..4e92ad2c4
 +});
 diff --git a/apps/server/src/provider/Layers/codexSharedTransport.ts b/apps/server/src/provider/Layers/codexSharedTransport.ts
 new file mode 100644
-index 000000000..f05c1c6b3
+index 00000000..f05c1c6b
 --- /dev/null
 +++ b/apps/server/src/provider/Layers/codexSharedTransport.ts
 @@ -0,0 +1,93 @@
@@ -1556,14 +1665,22 @@ index 000000000..f05c1c6b3
 +});
 diff --git a/apps/server/src/provider/SharedCodexDiscovery.test.ts b/apps/server/src/provider/SharedCodexDiscovery.test.ts
 new file mode 100644
-index 000000000..9dd784e4f
+index 00000000..8e9e4eef
 --- /dev/null
 +++ b/apps/server/src/provider/SharedCodexDiscovery.test.ts
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,140 @@
++import { it as effectIt } from "@effect/vitest";
++import * as Effect from "effect/Effect";
++import * as Fiber from "effect/Fiber";
++import * as TestClock from "effect/testing/TestClock";
 +import { ThreadId } from "@t3tools/contracts";
 +import { describe, expect, it } from "vite-plus/test";
 +
-+import { nativeMessages, shouldAttachSharedThread } from "./SharedCodexDiscovery.ts";
++import {
++  nativeMessages,
++  shouldAttachSharedThread,
++  sharedDiscoveryDeadline,
++} from "./SharedCodexDiscovery.ts";
 +
 +describe("native history reconciliation", () => {
 +  it("keeps native identities and excludes unfinished assistant snapshots", () => {
@@ -1653,12 +1770,51 @@ index 000000000..9dd784e4f
 +    expect(shouldAttachSharedThread(stopped, { updatedAt: idle.updatedAt })).toBe(false);
 +  });
 +});
++
++describe("failed shared imports", () => {
++  it("retries an incomplete import after its persisted stopped binding is reloaded", () => {
++    const binding = JSON.parse(
++      JSON.stringify({
++        status: "stopped",
++        lastSeenAt: "2026-09-12T12:00:00Z",
++        runtimePayload: { sharedImportPending: true },
++      }),
++    );
++    const native = { updatedAt: 1, status: { type: "idle" } };
++    expect(shouldAttachSharedThread(binding, native)).toBe(true);
++    expect(
++      shouldAttachSharedThread(
++        { ...binding, runtimePayload: { sharedImportPending: false } },
++        native,
++      ),
++    ).toBe(false);
++  });
++});
++effectIt.effect("expires a silent metadata request and runs its cancellation finalizer", () =>
++  Effect.gen(function* () {
++    let cancelled = false;
++    const fiber = yield* Effect.never.pipe(
++      Effect.ensuring(
++        Effect.sync(() => {
++          cancelled = true;
++        }),
++      ),
++      sharedDiscoveryDeadline,
++      Effect.flip,
++      Effect.forkScoped,
++    );
++    yield* TestClock.adjust("10 seconds");
++    const failure = yield* Fiber.join(fiber);
++    expect(failure._tag).toBe("TimeoutError");
++    expect(cancelled).toBe(true);
++  }),
++);
 diff --git a/apps/server/src/provider/SharedCodexDiscovery.ts b/apps/server/src/provider/SharedCodexDiscovery.ts
 new file mode 100644
-index 000000000..4c73bf773
+index 00000000..0f9c90e3
 --- /dev/null
 +++ b/apps/server/src/provider/SharedCodexDiscovery.ts
-@@ -0,0 +1,375 @@
+@@ -0,0 +1,393 @@
 +import {
 +  CommandId,
 +  MessageId,
@@ -1737,11 +1893,19 @@ index 000000000..4c73bf773
 +  Schema.fromJsonString(Schema.Array(Schema.String)),
 +);
 +
++export const sharedDiscoveryDeadline = Effect.timeout("10 seconds");
++const decodeImportState = Schema.decodeUnknownOption(
++  Schema.Struct({ sharedImportPending: Schema.Literal(true) }),
++);
++function importPending(payload: unknown) {
++  return Option.isSome(decodeImportState(payload));
++}
++
 +export function shouldAttachSharedThread(
-+  binding: { status?: string; lastSeenAt: string } | undefined,
++  binding: { status?: string; lastSeenAt: string; runtimePayload?: unknown } | undefined,
 +  native: { updatedAt: number; status?: { type: string } },
 +): boolean {
-+  if (binding?.status !== "stopped") return true;
++  if (binding?.status !== "stopped" || importPending(binding.runtimePayload)) return true;
 +  // A loaded thread can be waiting for native idle expiry. Discovery must not
 +  // restart its subscription solely because T3's idle reaper detached it.
 +  return (
@@ -1812,10 +1976,12 @@ index 000000000..4c73bf773
 +        CodexClient.layerStdio(transport.stdio, {}, transport.terminationError),
 +      );
 +      const client = yield* CodexClient.CodexAppServerClient.pipe(Effect.provide(context));
-+      yield* client.raw.request("initialize", {
-+        clientInfo: { name: "t3_shared_discovery", version: "0.1.0" },
-+        capabilities: { experimentalApi: true },
-+      });
++      yield* client.raw
++        .request("initialize", {
++          clientInfo: { name: "t3_shared_discovery", version: "0.1.0" },
++          capabilities: { experimentalApi: true },
++        })
++        .pipe(Effect.timeout("60 seconds"));
 +      yield* client.raw.notify("initialized");
 +      const synchronize = Effect.gen(function* () {
 +        const disabled = new Set(
@@ -1845,7 +2011,7 @@ index 000000000..4c73bf773
 +        do {
 +          const page: { data: ReadonlyArray<string>; nextCursor: string | null } = yield* client.raw
 +            .request("thread/loaded/list", { cursor, limit: 100 })
-+            .pipe(Effect.flatMap(decodeLoadedPage));
++            .pipe(sharedDiscoveryDeadline, Effect.flatMap(decodeLoadedPage));
 +          for (const id of page.data) loaded.add(id);
 +          cursor = page.nextCursor;
 +        } while (cursor);
@@ -1863,7 +2029,7 @@ index 000000000..4c73bf773
 +                useStateDbOnly: true,
 +                sourceKinds: ["cli", "appServer", "vscode"],
 +              })
-+              .pipe(Effect.flatMap(decodeThreadPage));
++              .pipe(sharedDiscoveryDeadline, Effect.flatMap(decodeThreadPage));
 +            candidates.push(
 +              ...page.data.filter(
 +                (thread) =>
@@ -1883,6 +2049,7 @@ index 000000000..4c73bf773
 +          for (const id of registered) {
 +            if (!loaded.has(id) || candidates.some((candidate) => candidate.id === id)) continue;
 +            yield* client.raw.request("thread/read", { threadId: id, includeTurns: false }).pipe(
++              sharedDiscoveryDeadline,
 +              Effect.flatMap(decodeThread),
 +              Effect.tap(({ thread }) =>
 +                Effect.sync(() => {
@@ -1931,7 +2098,7 @@ index 000000000..4c73bf773
 +                session.threadId === threadId &&
 +                (session.status === "ready" || session.status === "running"),
 +            );
-+            if (live) return;
++            if (live && !importPending(existingBinding?.runtimePayload)) return;
 +            if (Option.isSome(existing) && !shouldAttachSharedThread(existingBinding, native))
 +              return;
 +            const now = DateTime.formatIso(yield* DateTime.now);
@@ -1965,7 +2132,7 @@ index 000000000..4c73bf773
 +                  status: "stopped",
 +                  resumeCursor: { threadId: native.id },
 +                  runtimeMode: "approval-required",
-+                  runtimePayload: { cwd: native.cwd },
++                  runtimePayload: { cwd: native.cwd, sharedImportPending: true },
 +                },
 +                { onConflict: "ignore" },
 +              );
@@ -1986,7 +2153,7 @@ index 000000000..4c73bf773
 +            }
 +            const before = yield* client.raw
 +              .request("thread/read", { threadId: native.id, includeTurns: true })
-+              .pipe(Effect.flatMap(decodeThread));
++              .pipe(sharedDiscoveryDeadline, Effect.flatMap(decodeThread));
 +            for (const message of nativeMessages(threadId, before.thread)) {
 +              yield* engine.dispatch({
 +                type: "thread.message.observe",
@@ -1994,18 +2161,19 @@ index 000000000..4c73bf773
 +                ...message,
 +              });
 +            }
-+            yield* providers.startSession(threadId, {
-+              threadId,
-+              provider: ProviderDriverKind.make("codex"),
-+              providerInstanceId: instanceId,
-+              cwd: native.cwd,
-+              runtimeMode: "approval-required",
-+              resumeCursor: { threadId: native.id },
-+              modelSelection: { instanceId, model: native.model ?? "unknown" },
-+            });
++            if (!live)
++              yield* providers.startSession(threadId, {
++                threadId,
++                provider: ProviderDriverKind.make("codex"),
++                providerInstanceId: instanceId,
++                cwd: native.cwd,
++                runtimeMode: "approval-required",
++                resumeCursor: { threadId: native.id },
++                modelSelection: { instanceId, model: native.model ?? "unknown" },
++              });
 +            const after = yield* client.raw
 +              .request("thread/read", { threadId: native.id, includeTurns: true })
-+              .pipe(Effect.flatMap(decodeThread));
++              .pipe(sharedDiscoveryDeadline, Effect.flatMap(decodeThread));
 +            for (const message of nativeMessages(threadId, after.thread)) {
 +              yield* engine.dispatch({
 +                type: "thread.message.observe",
@@ -2013,6 +2181,12 @@ index 000000000..4c73bf773
 +                ...message,
 +              });
 +            }
++            yield* directory.upsert({
++              threadId,
++              provider: ProviderDriverKind.make("codex"),
++              providerInstanceId: instanceId,
++              runtimePayload: { sharedImportPending: false },
++            });
 +          }).pipe(
 +            Effect.catch((cause) =>
 +              Effect.logWarning("Shared Codex conversation could not be synchronized", {
@@ -2036,7 +2210,7 @@ index 000000000..4c73bf773
 +});
 diff --git a/apps/server/src/provider/sharedCodex.ts b/apps/server/src/provider/sharedCodex.ts
 new file mode 100644
-index 000000000..d5b748513
+index 00000000..d5b74851
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodex.ts
 @@ -0,0 +1,3 @@
@@ -2045,7 +2219,7 @@ index 000000000..d5b748513
 +}
 diff --git a/apps/server/src/provider/sharedCodexBenchmark.test.ts b/apps/server/src/provider/sharedCodexBenchmark.test.ts
 new file mode 100644
-index 000000000..3d4528753
+index 00000000..3d452875
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexBenchmark.test.ts
 @@ -0,0 +1,63 @@
@@ -2114,7 +2288,7 @@ index 000000000..3d4528753
 +});
 diff --git a/apps/server/src/provider/sharedCodexBenchmark.ts b/apps/server/src/provider/sharedCodexBenchmark.ts
 new file mode 100644
-index 000000000..47f2daec4
+index 00000000..47f2daec
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexBenchmark.ts
 @@ -0,0 +1,91 @@
@@ -2211,7 +2385,7 @@ index 000000000..47f2daec4
 +}
 diff --git a/apps/server/src/provider/sharedCodexLaunch.test.ts b/apps/server/src/provider/sharedCodexLaunch.test.ts
 new file mode 100644
-index 000000000..6feba6272
+index 00000000..6feba627
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexLaunch.test.ts
 @@ -0,0 +1,30 @@
@@ -2247,7 +2421,7 @@ index 000000000..6feba6272
 +});
 diff --git a/apps/server/src/provider/sharedCodexLaunch.ts b/apps/server/src/provider/sharedCodexLaunch.ts
 new file mode 100644
-index 000000000..88caa1ee3
+index 00000000..88caa1ee
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexLaunch.ts
 @@ -0,0 +1,78 @@
@@ -2331,7 +2505,7 @@ index 000000000..88caa1ee3
 +}
 diff --git a/apps/server/src/provider/sharedCodexRegistration.test.ts b/apps/server/src/provider/sharedCodexRegistration.test.ts
 new file mode 100644
-index 000000000..1739ded8f
+index 00000000..1739ded8
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexRegistration.test.ts
 @@ -0,0 +1,51 @@
@@ -2388,7 +2562,7 @@ index 000000000..1739ded8f
 +});
 diff --git a/apps/server/src/provider/sharedCodexRegistration.ts b/apps/server/src/provider/sharedCodexRegistration.ts
 new file mode 100644
-index 000000000..bb07a3e84
+index 00000000..bb07a3e8
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexRegistration.ts
 @@ -0,0 +1,40 @@
@@ -2434,7 +2608,7 @@ index 000000000..bb07a3e84
 +}
 diff --git a/apps/server/src/provider/sharedCodexTerminalRelay.test.ts b/apps/server/src/provider/sharedCodexTerminalRelay.test.ts
 new file mode 100644
-index 000000000..5dfff790b
+index 00000000..5dfff790
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexTerminalRelay.test.ts
 @@ -0,0 +1,267 @@
@@ -2707,7 +2881,7 @@ index 000000000..5dfff790b
 +});
 diff --git a/apps/server/src/provider/sharedCodexTerminalRelay.ts b/apps/server/src/provider/sharedCodexTerminalRelay.ts
 new file mode 100644
-index 000000000..f5ee62f46
+index 00000000..f5ee62f4
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexTerminalRelay.ts
 @@ -0,0 +1,120 @@
@@ -2833,7 +3007,7 @@ index 000000000..f5ee62f46
 +}
 diff --git a/apps/server/src/provider/sharedCodexTerminalState.test.ts b/apps/server/src/provider/sharedCodexTerminalState.test.ts
 new file mode 100644
-index 000000000..03e251d06
+index 00000000..03e251d0
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexTerminalState.test.ts
 @@ -0,0 +1,80 @@
@@ -2919,7 +3093,7 @@ index 000000000..03e251d06
 +});
 diff --git a/apps/server/src/provider/sharedCodexTerminalState.ts b/apps/server/src/provider/sharedCodexTerminalState.ts
 new file mode 100644
-index 000000000..48cdbe2bb
+index 00000000..48cdbe2b
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexTerminalState.ts
 @@ -0,0 +1,122 @@
@@ -3046,7 +3220,7 @@ index 000000000..48cdbe2bb
 +  };
 +}
 diff --git a/apps/server/src/serverRuntimeStartup.reconcile.test.ts b/apps/server/src/serverRuntimeStartup.reconcile.test.ts
-index 37fd210ee..3e9e6fed2 100644
+index 37fd210e..3e9e6fed 100644
 --- a/apps/server/src/serverRuntimeStartup.reconcile.test.ts
 +++ b/apps/server/src/serverRuntimeStartup.reconcile.test.ts
 @@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
@@ -3084,7 +3258,7 @@ index 37fd210ee..3e9e6fed2 100644
    const active = makeThread("thread-mark-active", "running", TurnId.make("turn-mark-active"));
    const archived = makeThread(
 diff --git a/apps/server/src/serverRuntimeStartup.ts b/apps/server/src/serverRuntimeStartup.ts
-index 090543925..20a804d4b 100644
+index 09054392..20a804d4 100644
 --- a/apps/server/src/serverRuntimeStartup.ts
 +++ b/apps/server/src/serverRuntimeStartup.ts
 @@ -1,3 +1,5 @@
@@ -3111,7 +3285,7 @@ index 090543925..20a804d4b 100644
        Effect.annotateSpans({
 diff --git a/apps/server/src/sharedCodexTerminal.ts b/apps/server/src/sharedCodexTerminal.ts
 new file mode 100644
-index 000000000..b50edd0f7
+index 00000000..b50edd0f
 --- /dev/null
 +++ b/apps/server/src/sharedCodexTerminal.ts
 @@ -0,0 +1,94 @@
@@ -3210,7 +3384,7 @@ index 000000000..b50edd0f7
 +    );
 +}
 diff --git a/packages/contracts/src/orchestration.ts b/packages/contracts/src/orchestration.ts
-index da4eac53d..d27ad2607 100644
+index da4eac53..d27ad260 100644
 --- a/packages/contracts/src/orchestration.ts
 +++ b/packages/contracts/src/orchestration.ts
 @@ -1165,6 +1165,18 @@ const ThreadHistoryImportCommand = Schema.Struct({
@@ -3241,7 +3415,7 @@ index da4eac53d..d27ad2607 100644
    ThreadTurnDiffCompleteCommand,
    ThreadActivityAppendCommand,
 diff --git a/packages/contracts/src/provider.ts b/packages/contracts/src/provider.ts
-index 3f9570a30..0f4deacab 100644
+index 3f9570a3..0f4deaca 100644
 --- a/packages/contracts/src/provider.ts
 +++ b/packages/contracts/src/provider.ts
 @@ -67,6 +67,7 @@ export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
@@ -3253,7 +3427,7 @@ index 3f9570a30..0f4deacab 100644
        explicitly support promptless continuation. */
    continuation: Schema.optional(Schema.Boolean),
 diff --git a/packages/effect-codex-app-server/src/client.test.ts b/packages/effect-codex-app-server/src/client.test.ts
-index 3830c5fc5..d1c476a8d 100644
+index 3830c5fc..d1c476a8 100644
 --- a/packages/effect-codex-app-server/src/client.test.ts
 +++ b/packages/effect-codex-app-server/src/client.test.ts
 @@ -32,6 +32,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
@@ -3284,7 +3458,7 @@ index 3830c5fc5..d1c476a8d 100644
          {
            itemId: "item-approval-1",
 diff --git a/packages/effect-codex-app-server/src/client.ts b/packages/effect-codex-app-server/src/client.ts
-index 78d719626..c927be19c 100644
+index 78d71962..c927be19 100644
 --- a/packages/effect-codex-app-server/src/client.ts
 +++ b/packages/effect-codex-app-server/src/client.ts
 @@ -51,6 +51,7 @@ export class CodexAppServerClient extends Context.Service<
@@ -3333,7 +3507,7 @@ index 78d719626..c927be19c 100644
    "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
  )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
 diff --git a/packages/effect-codex-app-server/src/errors.ts b/packages/effect-codex-app-server/src/errors.ts
-index f0bf470c2..39e761277 100644
+index f0bf470c..39e76127 100644
 --- a/packages/effect-codex-app-server/src/errors.ts
 +++ b/packages/effect-codex-app-server/src/errors.ts
 @@ -108,6 +108,8 @@ export const CodexAppServerProtocolParseOperation = Schema.Literals([
