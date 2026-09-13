@@ -34,7 +34,7 @@ type Log struct {
 func NewLog(data string) (*Log, error) {
 	dir := filepath.Join(data, "logs")
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, err
+		return &Log{}, err
 	}
 	l := &Log{queue: make(chan Event, 128), done: make(chan struct{}), dir: dir}
 	go func() {
@@ -55,10 +55,12 @@ func (l *Log) Emit(event string) {
 	}
 }
 func (l *Log) Close() {
-	close(l.queue)
-	select {
-	case <-l.done:
-	case <-time.After(2 * time.Second):
+	if l.queue != nil {
+		close(l.queue)
+		select {
+		case <-l.done:
+		case <-time.After(2 * time.Second):
+		}
 	}
 	if l.dropped.Load() > 0 {
 		fmt.Fprintln(os.Stderr, "Bridge diagnostics dropped records; check disk space and permissions.")

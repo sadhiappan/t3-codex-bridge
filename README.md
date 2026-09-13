@@ -100,7 +100,7 @@ Use a disposable project first. Follow [TESTING.md](TESTING.md), then file a [bu
 - Bundled tools/source: `.runtime/` inside this checkout (ignored by Git).
 - T3 database and registration markers: `~/.local/share/t3-codex-bridge/`.
 - Codex authentication/history/config: existing `~/.codex`, or your explicit `CODEX_HOME`.
-- Terminal diagnostic log: `~/.local/state/t3-codex-bridge/terminal.log`.
+- Go metadata logs: `$T3_BRIDGE_HOME/logs/` (default `~/.local/share/t3-codex-bridge/logs/`). Use `bridge logs`; `bridge diagnostics collect` prints an allowlisted support report.
 - Set `T3_BRIDGE_HOME` for a different T3 data directory or `T3_BRIDGE_PORT` for a different local port; use consistent settings for `serve`, `pair`, and `codex`.
 - Set `T3_BRIDGE_HOST` to bind an existing LAN address for direct phone access. The default is `127.0.0.1`; pairing authentication still applies when using a LAN address.
 
@@ -120,6 +120,6 @@ You can then remove this checkout and, after backing it up, its dedicated T3 dat
 
 ## Development and attribution
 
-`npm test` checks the companion launcher. `./scripts/test-upstream.sh` runs the focused shared-session tests after setup. CI builds the pinned patched server and web client on macOS.
+`go test -race ./internal/bridge` checks the Go runtime; `npm test` checks shell launcher compatibility. `./scripts/test-upstream.sh` runs the focused shared-session tests after setup. CI builds the pinned patched server and web client on macOS.
 
 [MIT license](LICENSE). T3 Code copyright © 2026 T3 Tools Inc.; see [NOTICE](NOTICE). OpenAI Codex is fetched from npm under its own package license. This project is unaffiliated with T3 Tools or OpenAI.

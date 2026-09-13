@@ -68,3 +68,17 @@ func TestDiagnosticsExcludeSavedData(t *testing.T) {
 		t.Fatal("private data leaked")
 	}
 }
+
+func TestUnavailableLogsDoNotPreventExecution(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "logs"), []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	log, err := NewLog(dir)
+	if err == nil || log == nil {
+		t.Fatal("expected warning and usable fallback")
+	}
+	log.Emit("terminal_started")
+	log.EmitSession("session_registered", "private")
+	log.Close()
+}

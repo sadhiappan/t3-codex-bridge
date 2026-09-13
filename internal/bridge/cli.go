@@ -141,7 +141,7 @@ No automatic Codex daemon restarts. Micro is not included.`)
 		}
 		log, err := NewLog(c.Data)
 		if err != nil {
-			return err
+			fmt.Fprintln(os.Stderr, "Bridge diagnostic logs unavailable; continuing without file logs.")
 		}
 		defer log.Close()
 		stopMetrics, err := StartMetrics(ctx, os.Getenv("T3_BRIDGE_OTLP_METRICS_URL"), log)
