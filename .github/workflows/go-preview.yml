@@ -1,0 +1,41 @@
+name: Go preview validation
+on:
+  push:
+    branches: ['feat/go-bridge']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.13.1
+      - run: go test -race ./internal/bridge
+        env:
+          T3_BRIDGE_STRESS: '1'
+      - run: go vet ./cmd/... ./internal/...
+      - run: ./scripts/build-go.sh
+      - run: npm test
+      - run: ./bin/bridge setup
+      - run: .runtime/t3/node_modules/.bin/tsgo --noEmit -p .runtime/t3/apps/server/tsconfig.json
+      - run: ./scripts/test-upstream.sh
+      - run: node scripts/package.mjs
+      - run: node scripts/smoke-go.mjs "dist/t3-codex-bridge-darwin-$(node -p process.arch)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-go-preview-${{ matrix.os }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          retention-days: 7

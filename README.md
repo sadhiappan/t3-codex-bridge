@@ -1,5 +1,7 @@
 # T3 Codex Bridge
 
+**Go rewrite preview:** this branch adds the native entry point `bin/bridge`. See [build instructions and validation limits](docs/GO-PREVIEW.md) and the [product requirements](docs/PRD.md). The existing alpha launcher below remains available during qualification.
+
 **Continue the same Codex conversation in your Mac terminal and T3 on your phone.**
 
 An independent, open-source **tester alpha**, built on [T3 Code](https://github.com/pingdotgg/t3code). This repository packages a shared-session patch and installer; it is not an official T3 or OpenAI release.
