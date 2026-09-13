@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ulimit -Sn 10240 || { echo 'Cannot raise file limit to 10240. See README troubleshooting.' >&2; exit 1; }
-export T3_BRIDGE_FILE_LIMIT="$(ulimit -Sn)"
 BRIDGE_SOURCE="${BASH_SOURCE[0]}"
 [[ "$BRIDGE_SOURCE" = /* ]] || BRIDGE_SOURCE="$PWD/$BRIDGE_SOURCE"
 while [[ -L "$BRIDGE_SOURCE" ]]; do
@@ -10,4 +8,8 @@ while [[ -L "$BRIDGE_SOURCE" ]]; do
   [[ "$BRIDGE_SOURCE" = /* ]] || BRIDGE_SOURCE="$BRIDGE_DIRECTORY/$BRIDGE_SOURCE"
 done
 ROOT="$(cd -- "$(dirname -- "$BRIDGE_SOURCE")" && pwd -P)"
-exec node "$ROOT/scripts/bridge.mjs" "$@"
+if [[ ! -x "$ROOT/bin/bridge" ]]; then
+  echo "Build the native CLI first: ./scripts/build-go.sh (or download a prebuilt bundle)." >&2
+  exit 1
+fi
+exec "$ROOT/bin/bridge" "$@"

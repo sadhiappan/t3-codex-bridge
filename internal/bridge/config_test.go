@@ -1,6 +1,9 @@
 package bridge
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,5 +56,38 @@ func TestConfigHonorsMattHostAndPort(t *testing.T) {
 		if _, err := LoadConfig(root); err == nil {
 			t.Fatal("invalid port accepted")
 		}
+	}
+}
+
+func TestSourceReceiptRejectsStaleBuild(t *testing.T) {
+	root := t.TempDir()
+	runtime := filepath.Join(root, ".runtime")
+	if err := os.MkdirAll(runtime, 0700); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{Root: root, Runtime: runtime, Versions: Versions{Codex: "test"}}
+	if err := c.Installed(); err == nil {
+		t.Fatal("missing receipt accepted")
+	}
+	patch := []byte("patch one")
+	os.WriteFile(filepath.Join(root, "shared-codex.patch"), patch, 0600)
+	receipt, _ := json.Marshal(struct {
+		Versions
+		PatchSHA256 string `json:"patchSHA256"`
+	}{c.Versions, fmt.Sprintf("%x", sha256.Sum256(patch))})
+	os.WriteFile(filepath.Join(runtime, "installed.json"), receipt, 0600)
+	c.Node = filepath.Join(runtime, "node")
+	c.Codex = filepath.Join(runtime, "codex")
+	c.Server = filepath.Join(runtime, "server")
+	os.Mkdir(filepath.Join(runtime, "client"), 0700)
+	for _, path := range []string{c.Node, c.Codex, c.Server, filepath.Join(runtime, "client/index.html")} {
+		os.WriteFile(path, []byte("fixture"), 0600)
+	}
+	if err := c.Installed(); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(root, "shared-codex.patch"), []byte("patch two"), 0600)
+	if err := c.Installed(); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("changed patch accepted: %v", err)
 	}
 }

@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,6 +15,7 @@ import (
 )
 
 type Versions struct {
+	Pnpm   string `json:"pnpm"`
 	Codex  string `json:"codex"`
 	Node   string `json:"node"`
 	Commit string `json:"commit"`
@@ -135,6 +137,27 @@ func RaiseLimit() (uint64, error) {
 	return limit.Cur, nil
 }
 func (c Config) Installed() error {
+	if filepath.Base(c.Runtime) == ".runtime" {
+		data, err := os.ReadFile(filepath.Join(c.Runtime, "installed.json"))
+		if err != nil {
+			return fmt.Errorf("source runtime has not been built; run bridge setup")
+		}
+		var stamp struct {
+			Versions
+			PatchSHA256 string `json:"patchSHA256"`
+		}
+		if err = json.Unmarshal(data, &stamp); err != nil {
+			return fmt.Errorf("invalid source build receipt; run bridge setup")
+		}
+		patch, err := os.ReadFile(filepath.Join(c.Root, "shared-codex.patch"))
+		if err != nil {
+			return err
+		}
+		if stamp.Versions != c.Versions || stamp.PatchSHA256 != fmt.Sprintf("%x", sha256.Sum256(patch)) {
+			return fmt.Errorf("source runtime is stale; run bridge setup")
+		}
+	}
+
 	for _, p := range []string{c.Node, c.Codex, c.Server, filepath.Join(filepath.Dir(c.Server), "client/index.html")} {
 		if p == "" {
 			return fmt.Errorf("Node runtime missing")

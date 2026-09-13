@@ -1,11 +1,14 @@
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { createServer } from 'node:net';
+import { createServer, createConnection } from 'node:net';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import assert from 'node:assert/strict';
-import { configuration, root, socketReady } from './bridge.mjs';
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+function socketReady(socket) { return new Promise((resolve) => { const client = createConnection(socket); const finish = (ready) => { client.destroy(); resolve(ready); }; client.setTimeout(1500, () => finish(false)); client.once('connect', () => finish(true)); client.once('error', () => finish(false)); }); }
 
 if (!process.argv[2]) throw new Error('Pass the prebuilt bundle directory.');
 const bundle = resolve(process.argv[2]);
@@ -17,7 +20,7 @@ const portServer = createServer();
 await new Promise((resolve) => portServer.listen(0, '127.0.0.1', resolve));
 const port = portServer.address().port;
 await new Promise((resolve) => portServer.close(resolve));
-const config = configuration({ ...process.env, CODEX_HOME: join(directory, 'codex'), T3_BRIDGE_HOME: join(directory, 'data'), T3_BRIDGE_PORT: String(port), T3_BRIDGE_HOST: '127.0.0.1' });
+const config = { codexHome: join(directory, 'codex'), env: { ...process.env, CODEX_HOME: join(directory, 'codex'), T3_BRIDGE_HOME: join(directory, 'data'), T3_BRIDGE_PORT: String(port), T3_BRIDGE_HOST: '127.0.0.1', T3_CODEX_SHARED_SOCKET: join(directory, 'codex/app-server-control/app-server-control.sock') } };
 config.env.T3_CODEX_BINARY = join(bundle, 'runtime/codex/bin/codex');
 config.env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 mkdirSync(join(config.codexHome, 'app-server-control'), { recursive: true, mode: 0o700 });

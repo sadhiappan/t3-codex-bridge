@@ -11,7 +11,7 @@ Build with Go 1.27.1 or later:
 
 For a source build, install the Node 24 version specified in `versions.json`, put it on PATH, and use `./bin/bridge setup`. The preview workflow builds platform-specific unsigned bundles with a private Node runtime. Use a new `T3_BRIDGE_HOME` and `CODEX_HOME` for isolated testing; configure authentication/MCPs there explicitly.
 
-The root `./bridge` remains the alpha launcher while this native entry point is qualified. No automatic replacement of an existing installation occurs.
+The root `./bridge` launches the compiled Go CLI. Runtime commands no longer invoke the old JavaScript launcher. Builds do not replace an existing installation.
 
 ## Implemented checks
 
@@ -27,7 +27,7 @@ The root `./bridge` remains the alpha launcher while this native entry point is 
 - Persistent cross-client settings readback and explicit capability handling in every affected stock T3 control.
 - Real launchd validation of the optional service; manual update/migration implementation.
 - Both-architecture clean-machine package validation, signing and notarization.
-- Opt-in redacted OTLP export; richer correlated health/resource reporting.
+- Redacted trace export and richer native-session/MCP resource reporting. Go process metrics already support opt-in export.
 - Independent review, real Mac/iPhone workflow tests, both architecture tests, 72-hour soak and native MCP lifecycle verification.
 
 A passing synthetic relay test does not prove native MCP cleanup or phone behavior. See [PRD](PRD.md) for acceptance criteria.
@@ -39,4 +39,10 @@ A passing synthetic relay test does not prove native MCP cleanup or phone behavi
 - Unsigned Apple Silicon bundle smoke passed with child PATH restricted to system directories: native initialize, Go doctor, built HTML/JS, HTTP 401 for an unauthenticated WebSocket, private pairing link generation.
 - No shared daemon restart, LaunchAgent installation, or live data migration was performed.
 
-These checks do not establish MCP health, real phone round-trips, Intel compatibility or sustained production reliability.
+The previous committed preview also passed clean CI builds and isolated bundle smoke on macOS 15 Apple Silicon and Intel. These checks do not establish MCP health, real phone round-trips, macOS 14 compatibility or sustained production reliability.
+
+## Optional operational features
+
+`bridge service install` writes a separate, explicitly requested login service; `bridge service start` loads it. Use `stop` before `uninstall`. It only manages the bridge/T3 child. It waits for native Codex to be started explicitly and stops recovery after three retries in ten minutes. Installation is not performed by builds or tests.
+
+Set `T3_BRIDGE_OTLP_METRICS_URL` to your collector's full metrics endpoint to export Go goroutine/heap gauges every ten seconds. Export is off by default; remote endpoints require HTTPS, redirects are not followed, and credential-bearing URLs are rejected. Use a local collector for authenticated forwarding. This does not enable raw T3 traces or send conversation content. Export failures are recorded without blocking agent work.

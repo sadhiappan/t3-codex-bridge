@@ -22,6 +22,16 @@ copy(realpathSync(process.execPath), join(output, 'runtime/node/bin/node'));
 copy(join(dirname(dirname(realpathSync(process.execPath))), 'LICENSE'), join(output, 'runtime/node/LICENSE'));
 copy(join(root, 'go.mod'), join(output, 'runtime/go/go.mod'));
 copy(join(root, 'go.sum'), join(output, 'runtime/go/go.sum'));
+const goEnv = spawnSync('go', ['env', '-json', 'GOMODCACHE', 'GOROOT'], { cwd: root, encoding: 'utf8' });
+if (goEnv.error || goEnv.status !== 0) throw new Error('Cannot locate Go dependency licenses');
+const { GOMODCACHE, GOROOT } = JSON.parse(goEnv.stdout);
+copy(join(GOROOT, 'LICENSE'), join(output, 'runtime/go/LICENSE'));
+for (const [, module, version] of readFileSync(join(root, 'go.mod'), 'utf8').matchAll(/^\s*((?:github\.com|golang\.org)\/\S+)\s+(v\S+)/gm)) {
+ const directory = join(GOMODCACHE, module + '@' + version);
+ const license = readdirSync(directory).find((name) => /^LICENSE(?:\..*)?$/i.test(name));
+ if (!license) throw new Error(`Dependency license missing: ${module}`);
+ copy(join(directory, license), join(output, 'runtime/go/licenses', module.replaceAll('/', '_') + '.txt'));
+}
 const codexLicense = await fetch(`https://raw.githubusercontent.com/openai/codex/rust-v${versions.codex}/LICENSE`, { signal: AbortSignal.timeout(15000) });
 if (!codexLicense.ok) throw new Error('Pinned Codex license is unavailable');
 mkdirSync(join(output, 'runtime/codex'), { recursive: true });

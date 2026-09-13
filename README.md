@@ -1,6 +1,6 @@
 # T3 Codex Bridge
 
-**Go rewrite preview:** this branch adds the native entry point `bin/bridge`. See [build instructions and validation limits](docs/GO-PREVIEW.md) and the [product requirements](docs/PRD.md). The existing alpha launcher below remains available during qualification.
+**Go rewrite preview:** this branch adds the native entry point `bin/bridge`. See [build instructions and validation limits](docs/GO-PREVIEW.md) and the [product requirements](docs/PRD.md). The `bridge` launcher now uses Go; the JavaScript helper is used only to build T3 from source.
 
 **Continue the same Codex conversation in your Mac terminal and T3 on your phone.**
 
@@ -19,25 +19,21 @@ Sessions use their original native Codex IDs. Only terminal sessions launched th
 
 ## 1. Prerequisites
 
-- macOS, Git, and **Node.js 24.13.1 or later in the Node 24 series** (npm included).
+- Source builds: macOS, Git, **Go 1.27.1**, and **Node.js 24.13.1** (npm included). Prebuilt bundles contain the runtimes.
 - A Codex account/subscription or supported API authentication.
 - For phone access: T3 mobile app and Tailscale on both devices, signed into the same tailnet. Keep your Mac awake.
 - Several GB of free space for the source build and dependencies. First setup takes several minutes.
 
-With Homebrew, install Node 24 using `brew install node@24`, then run:
-
-```bash
-export PATH="$(brew --prefix node@24)/bin:$PATH"
-node --version
-```
+For source builds, install [Go](https://go.dev/dl/) and [Node 24.13.1](https://nodejs.org/dist/v24.13.1/). Confirm `go version` and `node --version` match the pinned requirements before building. Prebuilt bundles include Node and do not require Go.
 
 The installer downloads **Codex 0.154.0 into this checkout**. It does not replace your global Codex installation. T3 and the patch are pinned in [versions.json](versions.json).
 
 ## 2. Install
 
 ```bash
-git clone https://github.com/sadhiappan/t3-codex-bridge.git "$HOME/t3-codex-bridge"
+git clone --branch feat/go-bridge https://github.com/sadhiappan/t3-codex-bridge.git "$HOME/t3-codex-bridge"
 cd "$HOME/t3-codex-bridge"
+./scripts/build-go.sh
 ./bridge setup
 ./bridge login
 ./bridge daemon-start
@@ -50,7 +46,7 @@ Leave the last command running. It serves the built web app on `127.0.0.1:18773`
 
 ## 3. Pair your phone
 
-In a second Mac terminal (also using Node 24; repeat the Homebrew PATH export above if needed):
+In a second Mac terminal:
 
 ```bash
 cd "$HOME/t3-codex-bridge"
