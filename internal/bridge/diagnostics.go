@@ -133,12 +133,13 @@ type Health struct {
 	CodexExpected string `json:"codexExpected"`
 	Protocol      string `json:"protocol"`
 	MCP           string `json:"mcp"`
+	Discovery     string `json:"discovery"`
 	Error         string `json:"error,omitempty"`
 	FileLimit     uint64 `json:"fileLimit"`
 }
 
 func (c Config) Health(ctx context.Context) Health {
-	h := Health{Schema: 1, Status: "unavailable", CodexExpected: c.Versions.Codex, Protocol: "unavailable", MCP: "unknown"}
+	h := Health{Schema: 1, Status: "unavailable", CodexExpected: c.Versions.Codex, Protocol: "unavailable", MCP: "unknown", Discovery: discoveryHealth(c.Data, time.Now())}
 	var limit unix.Rlimit
 	if unix.Getrlimit(unix.RLIMIT_NOFILE, &limit) == nil {
 		h.FileLimit = limit.Cur
@@ -183,9 +184,35 @@ func (c Config) Health(ctx context.Context) Health {
 		}
 		h.Protocol = "connected"
 		h.Status = "degraded"
+		if h.Discovery != "healthy" {
+			h.Status = "unavailable"
+			h.Error = "discovery_" + h.Discovery
+		}
 		return h
 	}
 }
+func discoveryHealth(data string, now time.Time) string {
+	b, err := os.ReadFile(filepath.Join(data, "discovery-health.json"))
+	if err != nil {
+		return "unknown"
+	}
+	var report struct {
+		Status    string    `json:"status"`
+		CheckedAt time.Time `json:"checkedAt"`
+	}
+	if json.Unmarshal(b, &report) != nil {
+		return "invalid"
+	}
+	if now.Sub(report.CheckedAt) > 2*time.Minute || report.CheckedAt.After(now.Add(time.Minute)) {
+		return "stale"
+	}
+	switch report.Status {
+	case "healthy", "degraded", "disconnected":
+		return report.Status
+	}
+	return "invalid"
+}
+
 func (c Config) Support(ctx context.Context, out io.Writer) error {
 	// An allowlisted health report only; never collect databases, environments or raw child output.
 	return json.NewEncoder(out).Encode(struct {
@@ -195,7 +222,7 @@ func (c Config) Support(ctx context.Context, out io.Writer) error {
 }
 func Capabilities() map[string]string {
 	return map[string]string{
-		"sharedHistory": "text-only", "fileRollback": "unsupported", "dynamicT3MCP": "unsupported", "persistentSettingsSync": "unverified", "nativeMCPHealth": "requires-session-verification",
+		"sharedHistory": "recent-50-turns-text-only", "fileRollback": "unsupported", "dynamicT3MCP": "unsupported", "persistentSettingsSync": "unverified", "nativeMCPHealth": "requires-session-verification",
 	}
 }
 

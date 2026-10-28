@@ -59,7 +59,7 @@ No automatic Codex daemon restarts. Micro is not included.`)
 			}
 			return nil
 		}
-		fmt.Printf("Status: %s\nNative protocol: %s\nMCP: %s (verify in a real session)\nFile limit: %d\n", health.Status, health.Protocol, health.MCP, health.FileLimit)
+		fmt.Printf("Status: %s\nNative protocol: %s\nDiscovery: %s\nMCP: %s (verify in a real session)\nFile limit: %d\n", health.Status, health.Protocol, health.Discovery, health.MCP, health.FileLimit)
 		if health.Error != "" {
 			return fmt.Errorf("%s", health.Error)
 		}

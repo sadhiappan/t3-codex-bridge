@@ -81,6 +81,8 @@ The launcher prints a resume command when you leave a shared terminal. For a pho
 
 Native flags are forwarded, for example `bridge codex --model MODEL`. A profile must already exist in your Codex configuration. **Codex remote resume rejects permission overrides**: do not add `--profile yolo`, sandbox, or approval overrides when resuming a remote task. This project does not bypass native permission rules. Non-interactive utilities such as `bridge codex exec` are passed through locally; they are not registered for T3.
 
+Shared-session history imports the latest 50 turns as text summaries; older messages already imported into T3 remain there. Each import uses an isolated connection so a failed history read cannot disconnect discovery for other sessions. `bridge doctor` reports discovery health separately from native protocol and MCP health.
+
 ## What to test
 
 Use a disposable project first. Follow [TESTING.md](TESTING.md), then file a [bug report](https://github.com/sadhiappan/t3-codex-bridge/issues/new?template=bug.yml). Each tester installs on their own host and pairs their own phone. This is not a shared public server.

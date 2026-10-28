@@ -23,7 +23,7 @@ func TestDoctorRequiresRPCAndDoesNotClaimMCPHealth(t *testing.T) {
 		c.Read(ctx)
 	})
 	h := (Config{Socket: socket}).Health(ctx)
-	if h.Protocol != "connected" || h.Status != "degraded" || h.MCP != "unknown" {
+	if h.Protocol != "connected" || h.Status != "unavailable" || h.Error != "discovery_unknown" || h.MCP != "unknown" {
 		t.Fatal(h)
 	}
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+from contextlib import closing
+import datetime
 import fcntl
 import hashlib
 import json
@@ -10,15 +12,51 @@ import re
 import select
 import sqlite3
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import supervisor
+
 
 class T3Error(Exception):
     pass
+
+
+class Refused(T3Error):
+    pass
+
+
+AUDIT_MAX_BYTES = 2 * 1024 * 1024
+
+
+def audit(data, operation_id, sid, event, **fields):
+    directory = data / 'diagnostics'
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = directory / 'lifecycle.jsonl'
+    with (directory / '.lock').open('a') as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if path.exists() and path.stat().st_size >= AUDIT_MAX_BYTES:
+            for index in range(2, 0, -1):
+                old = directory / ('lifecycle.jsonl.' + str(index))
+                if old.exists(): old.replace(directory / ('lifecycle.jsonl.' + str(index + 1)))
+            path.replace(directory / 'lifecycle.jsonl.1')
+        entry = dict(time=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                     operationId=operation_id, nativeThreadId=sid, event=event, pid=os.getpid(), **fields)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, 'a') as output:
+            output.write(json.dumps(entry, separators=(',', ':')) + '\n')
+
+
+UNSUPERVISED = ('This session is not owned by the shared daemon and was not started under handoff supervision '
+                '(it predates the supervised launcher or was started outside it), so it cannot move in place. '
+                'Nothing was signalled or changed and no duplicate session was created. '
+                'Exit it yourself when ready, then run: codex --t3 resume %s')
 
 
 def identity():
@@ -55,7 +93,7 @@ def record(data, sid):
     path = data / 't3/userdata/state.sqlite'
     if not path.is_file():
         raise T3Error('T3 database is unavailable.')
-    with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2) as db:
+    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
         rows = db.execute('SELECT t.thread_id,t.archived_at,t.deleted_at,r.status,r.resume_cursor_json FROM projection_threads t LEFT JOIN provider_session_runtime r ON t.thread_id=r.thread_id').fetchall()
     matches = []
     for tid, archived, deleted, status, cursor in rows:
@@ -84,6 +122,7 @@ def marker(data, sid, enable):
         suffix, other = ('.thread', '.unshared') if enable else ('.unshared', '.thread')
         fd = os.open(directory / (sid + suffix), os.O_CREAT | os.O_WRONLY, 0o600)
         os.close(fd)
+        os.utime(directory / (sid + suffix), None)
         (directory / (sid + other)).unlink(missing_ok=True)
 
 
@@ -177,24 +216,66 @@ class Client:
         }, token=self.token())
 
 
+def arm_handoff(sid, before):
+    try:
+        supervisor.arm(sid)
+    except supervisor.HandoffError as error:
+        raise T3Error(UNSUPERVISED % sid if str(error) == 'unsupervised' else str(error))
+    return dict(before, handoff='armed', next='Nothing changes while this session runs. When the user exits Codex normally '
+                '(Ctrl+D or /quit), this terminal reopens the conversation through the shared daemon. off cancels.')
+
+
 def run(action, data, sid, client, timeout=35):
+    operation_id = str(uuid.uuid4())
+    started = time.monotonic()
+    audit(data, operation_id, sid, 'toggle.started', action=action)
+    def trace(event, **fields):
+        audit(data, operation_id, sid, event, **fields)
+    try:
+        result = run_action(action, data, sid, client, timeout, trace)
+    except Exception as error:
+        trace('toggle.failed', errorType=type(error).__name__, elapsedMs=round((time.monotonic()-started)*1000))
+        raise
+    trace('toggle.completed', state=result, elapsedMs=round((time.monotonic()-started)*1000))
+    return result
+
+
+def run_action(action, data, sid, client, timeout, trace):
     client.request('/.well-known/t3/environment')
     row = record(data, sid)
     before = state(data, sid, row)
+    trace('toggle.observed', state=before, threadId=row['threadId'] if row else None)
+    armed = supervisor.armed(sid)
     if action == 'status':
-        return before
+        return before if armed is None else dict(before, handoff='armed' if armed else 'available')
     if row and row['deleted']:
-        raise T3Error('T3 entry was deleted; refusing to recreate it automatically.')
-    enable = not before['enabled'] if action == 'toggle' else action == 'on'
-    # Unarchive through T3's event pipeline before changing discovery intent.
+        raise (Refused if action == 'prepare-resume' else T3Error)('T3 entry was deleted; refusing to recreate it automatically.')
+    if action == 'prepare-resume':
+        # Supervisor-only: runs after the standalone process is confirmed gone, before the shared resume.
+        if row and row['archived']:
+            client.unarchive(row['threadId'])
+        return dict(prepared=True)
+    enable = not (before['enabled'] or armed) if action == 'toggle' else action == 'on'
+    # A standalone session must not gain a marker or T3 entry while its own process still writes it.
     if enable:
-        require_shared_owner()
+        try:
+            require_shared_owner()
+        except T3Error:
+            return arm_handoff(sid, before)
+    else:
+        supervisor.cancel(sid)
+    # Unarchive through T3's event pipeline before changing discovery intent.
     if enable and row and row['archived']:
         client.unarchive(row['threadId'])
     marker(data, sid, enable)
+    trace('toggle.intent', enabled=enable)
     deadline = time.monotonic() + timeout
+    previous = None
     while True:
         current = state(data, sid, record(data, sid))
+        if current != previous:
+            trace('toggle.observed', state=current)
+            previous = current
         if enable and current['enabled'] and current['attached']:
             return current
         if not enable and not current['enabled'] and current['runtime'] in ('stopped', 'absent', None):
@@ -206,7 +287,7 @@ def run(action, data, sid, client, timeout=35):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['on', 'off', 'status', 'toggle'], nargs='?', default='toggle')
+    parser.add_argument('action', choices=['on', 'off', 'status', 'toggle', 'prepare-resume'], nargs='?', default='toggle')
     args = parser.parse_args()
     data = Path(os.environ.get('T3_BRIDGE_HOME', str(Path.home() / '.local/share/t3-codex-bridge'))).resolve()
     sid = identity()
@@ -227,6 +308,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except Refused as error:
+        sys.stderr.write('T3 toggle: %s\n' % error)
+        sys.exit(supervisor.REFUSED)
     except (T3Error, OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
         # Never include HTTP bodies, CLI output, or credentials in diagnostics.
         message = str(error) if isinstance(error, T3Error) else type(error).__name__

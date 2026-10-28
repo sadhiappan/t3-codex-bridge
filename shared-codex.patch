@@ -1,5 +1,5 @@
 diff --git a/apps/server/src/observability/BrowserTraceCollector.ts b/apps/server/src/observability/BrowserTraceCollector.ts
-index 300a50fe..38b95774 100644
+index 300a50fe3..38b957748 100644
 --- a/apps/server/src/observability/BrowserTraceCollector.ts
 +++ b/apps/server/src/observability/BrowserTraceCollector.ts
 @@ -14,6 +14,7 @@ export const make = (sink: TraceSink): BrowserTraceCollector["Service"] =>
@@ -11,7 +11,7 @@ index 300a50fe..38b95774 100644
            sink.push(record);
          }
 diff --git a/apps/server/src/orchestration/Layers/CheckpointReactor.ts b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
-index d4d6b940..1056b248 100644
+index d4d6b9409..1056b2485 100644
 --- a/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 +++ b/apps/server/src/orchestration/Layers/CheckpointReactor.ts
 @@ -1,3 +1,4 @@
@@ -56,7 +56,7 @@ index d4d6b940..1056b248 100644
    const processInputSafely = (input: ReactorInput) =>
      processInput(input).pipe(
 diff --git a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
-index 0b2e08c4..bf4c96c7 100644
+index 0b2e08c40..bf4c96c7a 100644
 --- a/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
 +++ b/apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts
 @@ -115,6 +115,126 @@ const hasMetricSnapshot = (
@@ -187,7 +187,7 @@ index 0b2e08c4..bf4c96c7 100644
      "sends async answers with a %s session and rejects old duplicate replies",
      async (status) => {
 diff --git a/apps/server/src/orchestration/Layers/OrchestrationEngine.ts b/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
-index 6557888c..5c2581fb 100644
+index 6557888c3..5c2581fb5 100644
 --- a/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
 +++ b/apps/server/src/orchestration/Layers/OrchestrationEngine.ts
 @@ -2,6 +2,7 @@ import type {
@@ -255,7 +255,7 @@ index 6557888c..5c2581fb 100644
                } as const;
              }),
 diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
-index 5c1086b9..188c2037 100644
+index 5c1086b9e..188c2037c 100644
 --- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 @@ -1441,7 +1441,7 @@ const make = Effect.gen(function* () {
@@ -267,8 +267,194 @@ index 5c1086b9..188c2037 100644
        .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
    });
  
+diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
+index 1094ab48b..bb714161b 100644
+--- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
++++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts
+@@ -37,7 +37,7 @@ import * as Scope from "effect/Scope";
+ import * as Stream from "effect/Stream";
+ import * as Tracer from "effect/Tracer";
+ import { it as effectIt } from "@effect/vitest";
+-import { afterEach, describe, expect, it } from "vite-plus/test";
++import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+ 
+ import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+ import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
+@@ -4253,6 +4253,172 @@ describe("ProviderRuntimeIngestion", () => {
+     expect(completed?.payload).toMatchObject({ title: "Watch round-3 CI and bots" });
+   });
+ 
++  it.each([
++    "session.started",
++    "session.state.changed",
++    "turn.started",
++    "item.started",
++    "item.completed",
++  ])(
++    "dismisses obsolete shared async questions on %s without answering or approving",
++    async (type) => {
++      vi.stubEnv("T3_CODEX_SHARED_SOCKET", "/tmp/t3-popup-test.sock");
++      try {
++        const harness = await createHarness();
++        const base = {
++          provider: ProviderDriverKind.make("codex"),
++          threadId: asThreadId("thread-1"),
++          createdAt: "2026-01-01T00:00:01.000Z",
++          turnId: asTurnId("old-turn"),
++        };
++        await harness.emitAndDrain([
++          ...["old-async", "callback", "future-async"].map((requestId) => ({
++            ...base,
++            type: "user-input.requested",
++            eventId: asEventId(requestId),
++            requestId: ApprovalRequestId.make(requestId),
++            createdAt: requestId === "future-async" ? "2026-01-01T00:00:05.000Z" : base.createdAt,
++            payload: {
++              ...(requestId !== "callback" ? { responseMode: "message" } : {}),
++              questions: [{ id: "0", header: "Question", question: "Continue?", options: [] }],
++            },
++          })),
++          {
++            ...base,
++            type: "request.opened",
++            eventId: asEventId("permission"),
++            requestId: ApprovalRequestId.make("permission"),
++            payload: { requestType: "command_execution_approval" },
++          },
++          {
++            ...base,
++            type,
++            eventId: asEventId("reconcile"),
++            turnId: asTurnId("new-turn"),
++            itemId: asItemId("native-reply"),
++            createdAt: "2026-01-01T00:00:03.000Z",
++            payload: type.startsWith("item.")
++              ? { itemType: "user_message", detail: "Moving on" }
++              : type === "session.state.changed"
++                ? { state: "ready" }
++                : {},
++          },
++        ]);
++        const thread = (await harness.readModel()).threads[0]!;
++        const resolved = thread.activities.filter(
++          (activity) => activity.kind === "user-input.resolved",
++        );
++        expect(resolved).toHaveLength(1);
++        expect(resolved[0]?.payload).toMatchObject({
++          requestId: "old-async",
++          resolution: "dismissed",
++        });
++        expect(resolved[0]?.payload).not.toHaveProperty("answers");
++        expect(
++          thread.activities.filter((activity) => activity.kind === "approval.resolved"),
++        ).toEqual([]);
++        await harness.emitAndDrain([
++          {
++            ...base,
++            type,
++            eventId: asEventId("reconcile-again"),
++            turnId: asTurnId("new-turn"),
++            itemId: asItemId("native-reply"),
++            createdAt: "2026-01-01T00:00:04.000Z",
++            payload: type.startsWith("item.")
++              ? { itemType: "user_message", detail: "Moving on" }
++              : type === "session.state.changed"
++                ? { state: "ready" }
++                : {},
++          },
++        ]);
++        expect(
++          (await harness.readModel()).threads[0]?.activities.filter(
++            (activity) => activity.kind === "user-input.resolved",
++          ),
++        ).toHaveLength(1);
++      } finally {
++        vi.unstubAllEnvs();
++      }
++    },
++  );
++
++  it.each([true, false])(
++    "preserves current questions across duplicate lifecycle events (shared=%s)",
++    async (shared) => {
++      vi.stubEnv("T3_CODEX_SHARED_SOCKET", shared ? "/tmp/t3-popup-test.sock" : "");
++      try {
++        const harness = await createHarness();
++        const base = {
++          provider: ProviderDriverKind.make("codex"),
++          threadId: asThreadId("thread-1"),
++          turnId: asTurnId("current-turn"),
++          createdAt: "2026-01-01T00:00:01.000Z",
++        };
++        await harness.emitAndDrain([
++          { ...base, type: "turn.started", eventId: asEventId("start") },
++          {
++            ...base,
++            type: "user-input.requested",
++            eventId: asEventId("question"),
++            requestId: ApprovalRequestId.make("current-question"),
++            payload: {
++              responseMode: "message",
++              questions: [{ id: "0", header: "Question", question: "Continue?", options: [] }],
++            },
++          },
++          {
++            ...base,
++            type: "session.state.changed",
++            payload: { state: "ready" },
++            eventId: asEventId("duplicate-session"),
++            createdAt: "2026-01-01T00:00:02.000Z",
++          },
++          {
++            ...base,
++            type: "turn.started",
++            eventId: asEventId("duplicate-turn"),
++            createdAt: "2026-01-01T00:00:02.000Z",
++          },
++          {
++            ...base,
++            type: "turn.completed",
++            eventId: asEventId("completed"),
++            createdAt: "2026-01-01T00:00:02.000Z",
++            payload: { state: "completed" },
++          },
++        ]);
++        expect(
++          (await harness.readModel()).threads[0]?.activities.filter(
++            (activity) => activity.kind === "user-input.resolved",
++          ),
++        ).toEqual([]);
++        await harness.emitAndDrain([
++          {
++            ...base,
++            type: "item.completed",
++            eventId: asEventId("native-answer"),
++            createdAt: "2026-01-01T00:00:03.000Z",
++            itemId: asItemId("answer"),
++            payload: { itemType: "user_message", detail: "I already handled this" },
++          },
++        ]);
++        const resolved = (await harness.readModel()).threads[0]?.activities.filter(
++          (activity) => activity.kind === "user-input.resolved",
++        );
++        expect(resolved).toHaveLength(shared ? 1 : 0);
++        if (shared)
++          expect(resolved?.[0]?.payload).toEqual({
++            requestId: "current-question",
++            resolution: "dismissed",
++            reason: "native-conversation-continued",
++          });
++      } finally {
++        vi.unstubAllEnvs();
++      }
++    },
++  );
++
+   it("projects structured user input request and resolution as thread activities", async () => {
+     const harness = await createHarness();
+     const now = "2026-01-01T00:00:00.000Z";
 diff --git a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
-index 8d34fee4..5332fa02 100644
+index 8d34fee4f..84eae8f75 100644
 --- a/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 +++ b/apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 @@ -26,6 +26,7 @@ import * as Effect from "effect/Effect";
@@ -293,7 +479,7 @@ index 8d34fee4..5332fa02 100644
  
  const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
  const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
-@@ -1483,6 +1491,31 @@ const make = Effect.gen(function* () {
+@@ -1483,7 +1491,54 @@ const make = Effect.gen(function* () {
        const thread = yield* resolveThreadRuntimeContext(event.threadId);
        if (!thread) return;
  
@@ -323,9 +509,32 @@ index 8d34fee4..5332fa02 100644
 +      }
 +
        const now = event.createdAt;
++      if (
++        event.type === "user-input.requested" ||
++        event.type === "user-input.resolved" ||
++        event.type === "request.opened" ||
++        event.type === "request.resolved" ||
++        event.type === "session.started" ||
++        event.type === "session.exited"
++      ) {
++        yield* Effect.logInfo("provider.lifecycle.observed", {
++          at: now,
++          threadId: thread.id,
++          eventId: event.eventId,
++          eventType: event.type,
++          turnId: event.turnId ?? null,
++          requestId: event.requestId ?? null,
++          responseMode:
++            event.type === "user-input.requested"
++              ? (event.payload.responseMode ?? "callback")
++              : null,
++          activeTurnId: thread.session?.activeTurnId ?? null,
++        });
++      }
        const eventTurnId = toTurnId(event.turnId);
        const activeTurnId = thread.session?.activeTurnId ?? null;
-@@ -1517,7 +1550,7 @@ const make = Effect.gen(function* () {
+       const isTerminalTurn = event.type === "turn.completed" || event.type === "turn.aborted";
+@@ -1517,7 +1572,7 @@ const make = Effect.gen(function* () {
        const conflictingTurnStartIsPendingTurnStart =
          event.type === "turn.started" && conflictsWithActiveTurn
            ? sameId(yield* getExpectedProviderTurnIdForThread(thread.id), eventTurnId) &&
@@ -334,9 +543,84 @@ index 8d34fee4..5332fa02 100644
            : false;
  
        const shouldApplyThreadLifecycle = (() => {
+@@ -1549,6 +1604,74 @@ const make = Effect.gen(function* () {
+             return true;
+         }
+       })();
++      const nativeUserMessage =
++        (event.type === "item.started" || event.type === "item.completed") &&
++        event.payload.itemType === "user_message";
++      const providerReady =
++        event.type === "session.state.changed" && event.payload.state === "ready";
++      const questionDismissalReason = !shared
++        ? undefined
++        : nativeUserMessage
++          ? "native-conversation-continued"
++          : event.type === "session.started" || providerReady
++            ? "session-reconnected"
++            : event.type === "turn.started" && shouldApplyThreadLifecycle
++              ? "new-turn-started"
++              : undefined;
++      if (questionDismissalReason) {
++        // Ready carries the native turn ID; projection/session registration can still lag behind.
++        const preservedTurnId =
++          providerReady || event.type === "turn.started" ? eventTurnId : activeTurnId;
++        const activities =
++          yield* projectionThreadActivityRepository.listUserInputLifecycleByThreadId({
++            threadId: thread.id,
++          });
++        const closed = new Set<string>();
++        const obsolete = new Map<string, (typeof activities)[number]>();
++        for (const activity of activities) {
++          const payload = Predicate.isObject(activity.payload) ? activity.payload : undefined;
++          const requestId = payload?.requestId;
++          if (typeof requestId !== "string") continue;
++          if (activity.kind === "user-input.resolved") {
++            closed.add(requestId);
++            obsolete.delete(requestId);
++          } else if (
++            activity.kind === "user-input.requested" &&
++            payload?.responseMode === "message" &&
++            !closed.has(requestId) &&
++            activity.createdAt < event.createdAt &&
++            (nativeUserMessage || !sameId(activity.turnId, preservedTurnId))
++          ) {
++            obsolete.set(requestId, activity);
++          }
++        }
++        // Dismissal only retires the prompt; it never supplies an answer or grants permission.
++        for (const [requestId, activity] of obsolete) {
++          yield* orchestrationEngine.dispatch({
++            type: "thread.activity.append",
++            commandId: yield* providerCommandId(event, `dismiss-question:${requestId}`),
++            threadId: thread.id,
++            activity: {
++              id: EventId.make(`${event.eventId}:dismiss-question:${requestId}`),
++              createdAt: now,
++              tone: "info",
++              kind: "user-input.resolved",
++              summary: "Obsolete question dismissed",
++              payload: { requestId, resolution: "dismissed", reason: questionDismissalReason },
++              turnId: activity.turnId,
++            },
++            createdAt: now,
++          });
++          yield* Effect.logInfo("shared.question.dismissed", {
++            at: now,
++            threadId: thread.id,
++            requestId,
++            turnId: activity.turnId,
++            eventId: event.eventId,
++            reason: questionDismissalReason,
++          });
++        }
++      }
+       const acceptedTurnStartedSourcePlan =
+         event.type === "turn.started" && shouldApplyThreadLifecycle
+           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
 diff --git a/apps/server/src/orchestration/decider.observe.test.ts b/apps/server/src/orchestration/decider.observe.test.ts
 new file mode 100644
-index 00000000..bb2f26a6
+index 000000000..bb2f26a69
 --- /dev/null
 +++ b/apps/server/src/orchestration/decider.observe.test.ts
 @@ -0,0 +1,78 @@
@@ -419,7 +703,7 @@ index 00000000..bb2f26a6
 +  );
 +});
 diff --git a/apps/server/src/orchestration/decider.ts b/apps/server/src/orchestration/decider.ts
-index b93add31..fb904f1a 100644
+index b93add311..fb904f1ad 100644
 --- a/apps/server/src/orchestration/decider.ts
 +++ b/apps/server/src/orchestration/decider.ts
 @@ -9,6 +9,7 @@ import {
@@ -488,8 +772,42 @@ index b93add31..fb904f1a 100644
      case "thread.history.import": {
        const thread = yield* requireThread({
          readModel,
+diff --git a/apps/server/src/provider/Layers/CodexAdapter.test.ts b/apps/server/src/provider/Layers/CodexAdapter.test.ts
+index ef6e97d89..0573377fd 100644
+--- a/apps/server/src/provider/Layers/CodexAdapter.test.ts
++++ b/apps/server/src/provider/Layers/CodexAdapter.test.ts
+@@ -2275,6 +2275,29 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+     }),
+   );
+ 
++  it.effect("preserves the native active turn on the reconnect-ready event", () =>
++    Effect.gen(function* () {
++      const { adapter, runtime } = yield* startLifecycleRuntime();
++      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 1)).pipe(
++        Effect.forkChild,
++      );
++      yield* runtime.emit({
++        id: asEventId("ready-active-turn"),
++        kind: "session",
++        provider: ProviderDriverKind.make("codex"),
++        threadId: asThreadId("thread-1"),
++        turnId: asTurnId("native-active-turn"),
++        createdAt: "2026-01-01T00:00:01.000Z",
++        method: "session/ready",
++      });
++      const events = Array.from(yield* Fiber.join(eventsFiber));
++      NodeAssert.equal(events[0]?.type, "session.state.changed");
++      NodeAssert.equal(events[0]?.turnId, "native-active-turn");
++      if (events[0]?.type === "session.state.changed")
++        NodeAssert.equal(events[0].payload.state, "ready");
++    }),
++  );
++
+   it.effect(
+     "maps requestUserInput requests and answered notifications to canonical user-input events",
+     () =>
 diff --git a/apps/server/src/provider/Layers/CodexAdapter.ts b/apps/server/src/provider/Layers/CodexAdapter.ts
-index 5e224433..aa70f826 100644
+index 5e2244336..aa70f826b 100644
 --- a/apps/server/src/provider/Layers/CodexAdapter.ts
 +++ b/apps/server/src/provider/Layers/CodexAdapter.ts
 @@ -764,6 +764,9 @@ function itemTitle(
@@ -535,7 +853,7 @@ index 5e224433..aa70f826 100644
      startSession,
      sendTurn,
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
-index 3385137a..bfce907b 100644
+index 3385137a2..bfce907b5 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
 @@ -63,6 +63,39 @@ function makeThreadOpenResponse(
@@ -674,15 +992,16 @@ index 3385137a..bfce907b 100644
      Effect.gen(function* () {
        const response = makeThreadOpenResponse("saved-thread");
 diff --git a/apps/server/src/provider/Layers/CodexSessionRuntime.ts b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
-index 4ee5845e..cc474220 100644
+index 4ee5845e3..ba343dc42 100644
 --- a/apps/server/src/provider/Layers/CodexSessionRuntime.ts
 +++ b/apps/server/src/provider/Layers/CodexSessionRuntime.ts
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,5 @@
++import { readRecentSharedTurns, readIsolatedSharedHistory } from "../sharedCodexHistory.ts";
 +import { unsharedThreads } from "../sharedCodexRegistration.ts";
  import {
    ApprovalRequestId,
    DEFAULT_MODEL,
-@@ -38,6 +39,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
+@@ -38,6 +40,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
  
  import { buildCodexInitializeParams } from "./CodexProvider.ts";
  import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
@@ -690,7 +1009,7 @@ index 4ee5845e..cc474220 100644
  import { expandHomePath } from "../../pathExpansion.ts";
  import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
  const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
-@@ -158,6 +160,7 @@ export interface CodexSessionRuntimeOptions {
+@@ -158,6 +161,7 @@ export interface CodexSessionRuntimeOptions {
    readonly providerInstanceId?: ProviderInstanceId;
    readonly binaryPath: string;
    readonly homePath?: string;
@@ -698,7 +1017,7 @@ index 4ee5845e..cc474220 100644
    readonly launchArgs?: string;
    readonly environment?: NodeJS.ProcessEnv;
    readonly cwd: string;
-@@ -170,6 +173,7 @@ export interface CodexSessionRuntimeOptions {
+@@ -170,6 +174,7 @@ export interface CodexSessionRuntimeOptions {
  
  export interface CodexSessionRuntimeSendTurnInput {
    readonly input?: string;
@@ -706,7 +1025,7 @@ index 4ee5845e..cc474220 100644
    readonly attachments?: ReadonlyArray<{
      readonly type: "image";
      readonly url: string;
-@@ -279,7 +283,7 @@ interface PendingApproval {
+@@ -279,7 +284,7 @@ interface PendingApproval {
  
  interface ApprovalCorrelation {
    readonly requestId: ApprovalRequestId;
@@ -715,7 +1034,7 @@ index 4ee5845e..cc474220 100644
    readonly turnId: TurnId | undefined;
    readonly itemId: ProviderItemId | undefined;
  }
-@@ -604,6 +608,7 @@ export function buildTurnStartParams(input: {
+@@ -604,6 +609,7 @@ export function buildTurnStartParams(input: {
    readonly interactionMode?: ProviderInteractionMode;
    /** Defaults to true so callers that predate the agent-access gate are unchanged. */
    readonly browserToolsAvailable?: boolean;
@@ -723,7 +1042,7 @@ index 4ee5845e..cc474220 100644
  }): Effect.Effect<
    CodexTurnStartParamsWithCollaborationMode,
    CodexErrors.CodexAppServerProtocolParseError
-@@ -630,9 +635,13 @@ export function buildTurnStartParams(input: {
+@@ -630,9 +636,13 @@ export function buildTurnStartParams(input: {
    return decodeCodexTurnStartParamsWithCollaborationMode({
      threadId: input.threadId,
      input: turnInput,
@@ -740,7 +1059,7 @@ index 4ee5845e..cc474220 100644
      ...(input.model ? { model: input.model } : {}),
      ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
      ...(input.effort ? { effort: input.effort } : {}),
-@@ -709,6 +718,7 @@ export const openCodexThread = (input: {
+@@ -709,6 +719,7 @@ export const openCodexThread = (input: {
    readonly requestedModel: string | undefined;
    readonly serviceTier: CodexServiceTier | undefined;
    readonly resumeThreadId: string | undefined;
@@ -748,7 +1067,7 @@ index 4ee5845e..cc474220 100644
  }): Effect.Effect<typeof CodexThreadResumeMetadata.Type, CodexErrors.CodexAppServerError> => {
    const resumeThreadId = input.resumeThreadId;
    const startParams = buildThreadStartParams({
-@@ -722,6 +732,27 @@ export const openCodexThread = (input: {
+@@ -722,6 +733,27 @@ export const openCodexThread = (input: {
      return input.client.request("thread/start", startParams);
    }
  
@@ -776,7 +1095,7 @@ index 4ee5845e..cc474220 100644
    // Older providers may still return history despite excludeTurns. Only the
    // session metadata is needed here, so unrelated historical items cannot
    // prevent resuming a valid provider thread.
-@@ -1209,33 +1240,47 @@ export const makeCodexSessionRuntime = (
+@@ -1209,33 +1241,47 @@ export const makeCodexSessionRuntime = (
        ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
      };
      const extendEnv = options.environment === undefined;
@@ -851,7 +1170,7 @@ index 4ee5845e..cc474220 100644
        Layer.build,
        Effect.provideService(Scope.Scope, runtimeScope),
      );
-@@ -1804,7 +1849,7 @@ export const makeCodexSessionRuntime = (
+@@ -1804,7 +1850,7 @@ export const makeCodexSessionRuntime = (
            // conversation; interrupts are best-effort per child, so a
            // false-positive entry costs one ignored RPC at worst.
            const foreignThreadId = readNotificationThreadId(notification);
@@ -860,7 +1179,7 @@ index 4ee5845e..cc474220 100644
              if (notification.method === "turn/started") {
                const foreignTurnId =
                  typeof (notification.params as { turn?: { id?: unknown } }).turn?.id === "string"
-@@ -1854,6 +1899,20 @@ export const makeCodexSessionRuntime = (
+@@ -1854,6 +1900,20 @@ export const makeCodexSessionRuntime = (
              requestKind = correlation.requestKind;
              turnId = correlation.turnId ?? turnId;
              itemId = correlation.itemId ?? itemId;
@@ -881,7 +1200,7 @@ index 4ee5845e..cc474220 100644
              yield* Ref.update(approvalCorrelationsRef, (current) => {
                const next = new Map(current);
                next.delete(rawRequestId);
-@@ -1943,123 +2002,156 @@ export const makeCodexSessionRuntime = (
+@@ -1943,123 +2003,156 @@ export const makeCodexSessionRuntime = (
        ),
      );
  
@@ -974,7 +1293,7 @@ index 4ee5845e..cc474220 100644
            });
 -          return next;
 -        });
--
+ 
 -        yield* emitEvent({
 -          kind: "request",
 -          threadId: options.threadId,
@@ -985,7 +1304,7 @@ index 4ee5845e..cc474220 100644
 -          ...(itemId ? { itemId } : {}),
 -          payload,
 -        });
- 
+-
 -        const resolved = yield* Deferred.await(decision).pipe(
 -          Effect.ensuring(
 -            Ref.update(pendingApprovalsRef, (current) => {
@@ -1087,7 +1406,7 @@ index 4ee5845e..cc474220 100644
            });
 -          return next;
 -        });
--
+ 
 -        yield* emitEvent({
 -          kind: "request",
 -          threadId: options.threadId,
@@ -1098,7 +1417,7 @@ index 4ee5845e..cc474220 100644
 -          ...(itemId ? { itemId } : {}),
 -          payload,
 -        });
- 
+-
 -        const resolved = yield* Deferred.await(decision).pipe(
 -          Effect.ensuring(
 -            Ref.update(pendingApprovalsRef, (current) => {
@@ -1136,7 +1455,7 @@ index 4ee5845e..cc474220 100644
            yield* Effect.logWarning("Declined an unsupported MCP elicitation.", {
              serverName: payload.serverName,
              mode: payload.mode,
-@@ -2069,11 +2161,15 @@ export const makeCodexSessionRuntime = (
+@@ -2069,11 +2162,15 @@ export const makeCodexSessionRuntime = (
            } satisfies EffectCodexSchema.McpServerElicitationRequestResponse;
          }
  
@@ -1154,7 +1473,7 @@ index 4ee5845e..cc474220 100644
          const decision = yield* Deferred.make<ProviderApprovalDecision>();
  
          yield* Ref.update(pendingApprovalsRef, (current) => {
-@@ -2122,12 +2218,25 @@ export const makeCodexSessionRuntime = (
+@@ -2122,12 +2219,25 @@ export const makeCodexSessionRuntime = (
        }),
      );
  
@@ -1182,7 +1501,7 @@ index 4ee5845e..cc474220 100644
  
          yield* Ref.update(pendingUserInputsRef, (current) => {
            const next = new Map(current);
-@@ -2173,7 +2282,9 @@ export const makeCodexSessionRuntime = (
+@@ -2173,7 +2283,9 @@ export const makeCodexSessionRuntime = (
      );
  
      yield* client.handleUnknownServerRequest((method) =>
@@ -1193,7 +1512,7 @@ index 4ee5845e..cc474220 100644
      );
  
      const registerServerNotification = <M extends CodexRpc.ServerNotificationMethod>(method: M) =>
-@@ -2197,39 +2308,45 @@ export const makeCodexSessionRuntime = (
+@@ -2197,39 +2309,45 @@ export const makeCodexSessionRuntime = (
      );
  
      const stderrRemainderRef = yield* Ref.make("");
@@ -1269,7 +1588,7 @@ index 4ee5845e..cc474220 100644
        Effect.flatMap((exitCode) =>
          Ref.get(closedRef).pipe(
            Effect.flatMap((closed) => {
-@@ -2257,6 +2374,23 @@ export const makeCodexSessionRuntime = (
+@@ -2257,6 +2375,23 @@ export const makeCodexSessionRuntime = (
      );
  
      const start = Effect.fn("CodexSessionRuntime.start")(function* () {
@@ -1293,7 +1612,7 @@ index 4ee5845e..cc474220 100644
        yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
        yield* client.request("initialize", buildCodexInitializeParams());
        yield* client.notify("initialized", undefined);
-@@ -2271,12 +2405,43 @@ export const makeCodexSessionRuntime = (
+@@ -2271,19 +2406,42 @@ export const makeCodexSessionRuntime = (
          requestedModel,
          serviceTier: options.serviceTier,
          resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
@@ -1303,32 +1622,18 @@ index 4ee5845e..cc474220 100644
        const providerThreadId = opened.thread.id;
 +      const activeTurnId =
 +        shared && options.resumeCursor
-+          ? yield* client.raw
-+              .request("thread/read", { threadId: providerThreadId, includeTurns: true })
-+              .pipe(
-+                Effect.flatMap(
-+                  Schema.decodeUnknownEffect(
-+                    Schema.Struct({
-+                      thread: Schema.Struct({
-+                        turns: Schema.Array(
-+                          Schema.Struct({ id: Schema.String, status: Schema.String }),
-+                        ),
-+                      }),
-+                    }),
-+                  ),
-+                ),
-+                Effect.map(
-+                  (response) =>
-+                    response.thread.turns.find((turn) => turn.status === "inProgress")?.id,
-+                ),
-+                Effect.mapError(
-+                  (cause) =>
-+                    new CodexErrors.CodexAppServerTransportError({
-+                      operation: "read-input-stream",
-+                      cause,
-+                    }),
-+                ),
-+              )
++          ? yield* readRecentSharedTurns(client.raw.request, providerThreadId, "notLoaded").pipe(
++              Effect.map(
++                (response) => response.turns.find((turn) => turn.status === "inProgress")?.id,
++              ),
++              Effect.mapError(
++                (cause) =>
++                  new CodexErrors.CodexAppServerTransportError({
++                    operation: "read-input-stream",
++                    cause,
++                  }),
++              ),
++            )
 +          : undefined;
        const session = {
          ...(yield* Ref.get(sessionRef)),
@@ -1338,7 +1643,21 @@ index 4ee5845e..cc474220 100644
          cwd: opened.cwd,
          model: opened.model,
          resumeCursor: { threadId: providerThreadId },
-@@ -2302,8 +2467,10 @@ export const makeCodexSessionRuntime = (
+         updatedAt: yield* nowIso,
+       } satisfies ProviderSession;
+       yield* Ref.set(sessionRef, session);
+-      yield* emitSessionEvent("session/ready", "Codex App Server session ready.");
++      yield* emitEvent({
++        kind: "session",
++        threadId: options.threadId,
++        method: "session/ready",
++        message: "Codex App Server session ready.",
++        ...(activeTurnId ? { turnId: TurnId.make(activeTurnId) } : {}),
++      });
+       return session;
+     });
+ 
+@@ -2302,8 +2460,10 @@ export const makeCodexSessionRuntime = (
        if (alreadyClosed) {
          return;
        }
@@ -1351,7 +1670,7 @@ index 4ee5845e..cc474220 100644
        yield* updateSession(sessionRef, {
          status: "closed",
          activeTurnId: undefined,
-@@ -2328,7 +2495,7 @@ export const makeCodexSessionRuntime = (
+@@ -2328,7 +2488,7 @@ export const makeCodexSessionRuntime = (
        sendTurn: (input) =>
          Effect.gen(function* () {
            const providerThreadId = yield* readProviderThreadId;
@@ -1360,7 +1679,7 @@ index 4ee5845e..cc474220 100644
              yield* client.request("config/mcpServer/reload", undefined).pipe(
                Effect.catch((cause) =>
                  Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {
-@@ -2343,6 +2510,7 @@ export const makeCodexSessionRuntime = (
+@@ -2343,6 +2503,7 @@ export const makeCodexSessionRuntime = (
            const params = yield* buildTurnStartParams({
              threadId: providerThreadId,
              runtimeMode: options.runtimeMode,
@@ -1368,7 +1687,7 @@ index 4ee5845e..cc474220 100644
              ...(input.input ? { prompt: input.input } : {}),
              ...(input.attachments ? { attachments: input.attachments } : {}),
              ...(normalizedModel ? { model: normalizedModel } : {}),
-@@ -2352,9 +2520,14 @@ export const makeCodexSessionRuntime = (
+@@ -2352,9 +2513,14 @@ export const makeCodexSessionRuntime = (
              // Derived from the session's own MCP configuration rather than the
              // setting, so the prompt describes the tools this turn actually
              // has even if the setting changed after the session started.
@@ -1385,7 +1704,7 @@ index 4ee5845e..cc474220 100644
            const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
              Effect.mapError((error) =>
                CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
-@@ -2406,7 +2579,7 @@ export const makeCodexSessionRuntime = (
+@@ -2406,7 +2572,7 @@ export const makeCodexSessionRuntime = (
                  .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
              { concurrency: 8, discard: true },
            ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
@@ -1394,8 +1713,44 @@ index 4ee5845e..cc474220 100644
            if (!effectiveTurnId) {
              return;
            }
+@@ -2417,6 +2583,35 @@ export const makeCodexSessionRuntime = (
+         }),
+       readThread: Effect.gen(function* () {
+         const providerThreadId = yield* readProviderThreadId;
++        if (shared && options.sharedSocketPath) {
++          const history = yield* readIsolatedSharedHistory(
++            options.sharedSocketPath,
++            providerThreadId,
++          ).pipe(
++            Effect.mapError(
++              (cause) =>
++                new CodexErrors.CodexAppServerTransportError({
++                  operation: "read-input-stream",
++                  cause,
++                }),
++            ),
++          );
++          const turns = yield* Effect.forEach(history.turns, (turn) =>
++            Schema.decodeUnknownEffect(
++              Schema.Array(EffectCodexSchema.V2ThreadReadResponse__ThreadItem),
++            )(turn.items).pipe(
++              Effect.map((items) => ({ id: TurnId.make(turn.id), items })),
++              Effect.mapError(
++                (cause) =>
++                  new CodexErrors.CodexAppServerTransportError({
++                    operation: "read-input-stream",
++                    cause,
++                  }),
++              ),
++            ),
++          );
++          return { threadId: providerThreadId, turns };
++        }
+         const response = yield* client.request("thread/read", {
+           threadId: providerThreadId,
+           includeTurns: true,
 diff --git a/apps/server/src/provider/Layers/EventNdjsonLogger.test.ts b/apps/server/src/provider/Layers/EventNdjsonLogger.test.ts
-index 500f2815..b3255deb 100644
+index 500f2815c..b3255debd 100644
 --- a/apps/server/src/provider/Layers/EventNdjsonLogger.test.ts
 +++ b/apps/server/src/provider/Layers/EventNdjsonLogger.test.ts
 @@ -14,6 +14,7 @@ import * as TestClock from "effect/testing/TestClock";
@@ -1423,7 +1778,7 @@ index 500f2815..b3255deb 100644
 +  assert.deepEqual(providerDiagnosticMetadata({ method: secret }), { event: "other" });
 +});
 diff --git a/apps/server/src/provider/Layers/EventNdjsonLogger.ts b/apps/server/src/provider/Layers/EventNdjsonLogger.ts
-index fd81dbac..45e6b2ea 100644
+index fd81dbacb..45e6b2eab 100644
 --- a/apps/server/src/provider/Layers/EventNdjsonLogger.ts
 +++ b/apps/server/src/provider/Layers/EventNdjsonLogger.ts
 @@ -5,6 +5,8 @@
@@ -1491,10 +1846,10 @@ index fd81dbac..45e6b2ea 100644
          errorTag: errorTag(error),
 diff --git a/apps/server/src/provider/Layers/codexSharedTransport.test.ts b/apps/server/src/provider/Layers/codexSharedTransport.test.ts
 new file mode 100644
-index 00000000..4e92ad2c
+index 000000000..15f74473c
 --- /dev/null
 +++ b/apps/server/src/provider/Layers/codexSharedTransport.test.ts
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,109 @@
 +// @effect-diagnostics nodeBuiltinImport:off - exercises a real Unix WebSocket peer.
 +import * as NodeHttp from "node:http";
 +import * as NodeFSP from "node:fs/promises";
@@ -1508,6 +1863,7 @@ index 00000000..4e92ad2c
 +import { describe, expect } from "vite-plus/test";
 +import { it } from "@effect/vitest";
 +
++import { readIsolatedSharedHistory } from "../sharedCodexHistory.ts";
 +import { makeSharedCodexTransport } from "./codexSharedTransport.ts";
 +
 +describe("shared Codex socket", () => {
@@ -1563,10 +1919,49 @@ index 00000000..4e92ad2c
 +      expect(error.message).toContain("connect-shared-socket");
 +    }),
 +  );
++  it.effect("isolates a rejected history connection and releases successful readers", () =>
++    Effect.gen(function* () {
++      const dir = yield* Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "codex-history-")));
++      const socketPath = NodePath.join(dir, "rpc.sock");
++      const http = NodeHttp.createServer();
++      const server = new NodeWS.WebSocketServer({ server: http });
++      let historyConnections = 0;
++      server.on("connection", (socket) => {
++        socket.on("message", (data) => {
++          const message = JSON.parse(data.toString());
++          if (message.method === "initialized") return;
++          if (message.method === "thread/turns/list") {
++            historyConnections++;
++            if (message.params.threadId === "oversized") { socket.close(1009, "payload limit"); return; }
++            socket.send(JSON.stringify({ id: message.id, result: { data: [], nextCursor: null } }));
++          } else socket.send(JSON.stringify({ id: message.id, result: {} }));
++        });
++      });
++      yield* Effect.promise(() => new Promise<void>((resolve) => http.listen(socketPath, resolve)));
++      try {
++        yield* Effect.scoped(Effect.gen(function* () {
++          const transport = yield* makeSharedCodexTransport(socketPath);
++          const context = yield* Layer.build(CodexClient.layerStdio(transport.stdio, {}, transport.terminationError));
++          const metadataClient = yield* CodexClient.CodexAppServerClient.pipe(Effect.provide(context));
++          const failure = yield* readIsolatedSharedHistory(socketPath, "oversized").pipe(Effect.flip);
++          expect(failure).toBeDefined();
++          const history = yield* readIsolatedSharedHistory(socketPath, "healthy");
++          expect(history.turns).toEqual([]);
++          expect(historyConnections).toBe(2);
++          expect(yield* metadataClient.raw.request("test/still-connected", {})).toEqual({});
++        }));
++      } finally {
++        for (const socket of server.clients) socket.terminate();
++        server.close(); http.close();
++        yield* Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true }));
++      }
++    }),
++  );
++
 +});
 diff --git a/apps/server/src/provider/Layers/codexSharedTransport.ts b/apps/server/src/provider/Layers/codexSharedTransport.ts
 new file mode 100644
-index 00000000..f05c1c6b
+index 000000000..f05c1c6b3
 --- /dev/null
 +++ b/apps/server/src/provider/Layers/codexSharedTransport.ts
 @@ -0,0 +1,93 @@
@@ -1665,10 +2060,10 @@ index 00000000..f05c1c6b
 +});
 diff --git a/apps/server/src/provider/SharedCodexDiscovery.test.ts b/apps/server/src/provider/SharedCodexDiscovery.test.ts
 new file mode 100644
-index 00000000..8e9e4eef
+index 000000000..ee3bedcda
 --- /dev/null
 +++ b/apps/server/src/provider/SharedCodexDiscovery.test.ts
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,144 @@
 +import { it as effectIt } from "@effect/vitest";
 +import * as Effect from "effect/Effect";
 +import * as Fiber from "effect/Fiber";
@@ -1754,6 +2149,10 @@ index 00000000..8e9e4eef
 +      false,
 +    );
 +  });
++  it("honors a new explicit attach request after idle reaping", () => {
++    expect(shouldAttachSharedThread(stopped, idle, Date.parse(stopped.lastSeenAt) + 1)).toBe(true);
++    expect(shouldAttachSharedThread(stopped, idle, Date.parse(stopped.lastSeenAt) - 1)).toBe(false);
++  });
 +  it("reattaches for native work or an approval wait even within the same timestamp second", () => {
 +    expect(shouldAttachSharedThread(stopped, { ...idle, status: { type: "active" } })).toBe(true);
 +  });
@@ -1811,10 +2210,12 @@ index 00000000..8e9e4eef
 +);
 diff --git a/apps/server/src/provider/SharedCodexDiscovery.ts b/apps/server/src/provider/SharedCodexDiscovery.ts
 new file mode 100644
-index 00000000..0f9c90e3
+index 000000000..601e9592e
 --- /dev/null
 +++ b/apps/server/src/provider/SharedCodexDiscovery.ts
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,448 @@
++import * as FileSystem from "effect/FileSystem";
++import * as Path from "effect/Path";
 +import {
 +  CommandId,
 +  MessageId,
@@ -1839,7 +2240,9 @@ index 00000000..0f9c90e3
 +import { ProviderSessionDirectory } from "./Services/ProviderSessionDirectory.ts";
 +import { makeSharedCodexTransport } from "./Layers/codexSharedTransport.ts";
 +import { sharedCodexSocket } from "./sharedCodex.ts";
-+import { registeredSharedThreads, unsharedThreads } from "./sharedCodexRegistration.ts";
++import { sharedRegistrationTimes, unsharedThreads } from "./sharedCodexRegistration.ts";
++
++import { readIsolatedSharedHistory } from "./sharedCodexHistory.ts";
 +
 +class SharedCodexConfigError extends Schema.TaggedErrorClass<SharedCodexConfigError>()(
 +  "SharedCodexConfigError",
@@ -1904,11 +2307,13 @@ index 00000000..0f9c90e3
 +export function shouldAttachSharedThread(
 +  binding: { status?: string; lastSeenAt: string; runtimePayload?: unknown } | undefined,
 +  native: { updatedAt: number; status?: { type: string } },
++  requestedAt = 0,
 +): boolean {
 +  if (binding?.status !== "stopped" || importPending(binding.runtimePayload)) return true;
 +  // A loaded thread can be waiting for native idle expiry. Discovery must not
 +  // restart its subscription solely because T3's idle reaper detached it.
 +  return (
++    requestedAt > Date.parse(binding.lastSeenAt) ||
 +    native.status?.type === "active" || native.updatedAt * 1000 > Date.parse(binding.lastSeenAt)
 +  );
 +}
@@ -1946,6 +2351,12 @@ index 00000000..0f9c90e3
 +  );
 +}
 +
++const encodeDiscoveryHealth = Schema.encodeEffect(Schema.fromJsonString(Schema.Struct({
++  status: Schema.String, checkedAt: Schema.String, quarantined: Schema.Number,
++  registered: Schema.Number, loaded: Schema.Number, attached: Schema.Number, disabled: Schema.Number,
++  sessions: Schema.Array(Schema.Struct({ nativeThreadId: Schema.String, reason: Schema.String })),
++})));
++
 +export const startSharedCodexDiscovery = Effect.fn("startSharedCodexDiscovery")(function* () {
 +  const socketPath = sharedCodexSocket("codex");
 +  if (!socketPath) return;
@@ -1969,6 +2380,31 @@ index 00000000..0f9c90e3
 +  const instanceId = ProviderInstanceId.make("codex");
 +  const commandId = Effect.map(crypto.randomUUIDv4, CommandId.make);
 +
++  const retryAfter = new Map<string, number>();
++  const decisions = new Map<string, string>();
++  let counts = { registered: 0, loaded: 0, attached: 0, disabled: 0 };
++  const decision = (nativeThreadId: string, reason: string) => Effect.gen(function* () {
++    if (decisions.get(nativeThreadId) === reason) return;
++    decisions.set(nativeThreadId, reason);
++    yield* Effect.logInfo("shared.session.transition", {
++      at: DateTime.formatIso(yield* DateTime.now), nativeThreadId, reason,
++    });
++  });
++  const report = (status: string) => Effect.gen(function* () {
++    const home = process.env.T3CODE_HOME;
++    if (!home) return;
++    const checkedAt = yield* DateTime.now;
++    const fs = yield* FileSystem.FileSystem;
++    const paths = yield* Path.Path;
++    const path = paths.join(home, "..", "discovery-health.json");
++    const payload = yield* encodeDiscoveryHealth({ status, checkedAt: DateTime.formatIso(checkedAt), quarantined: retryAfter.size,
++      ...counts, sessions: [...decisions].map(([nativeThreadId, reason]) => ({ nativeThreadId, reason })),
++    });
++    yield* fs.writeFileString(path + ".tmp", payload, { mode: 0o600 }).pipe(
++      Effect.andThen(fs.rename(path + ".tmp", path)),
++      Effect.catch(() => Effect.logWarning("Discovery health report could not be written")),
++    );
++  });
 +  const connection = Effect.scoped(
 +    Effect.gen(function* () {
 +      const transport = yield* makeSharedCodexTransport(socketPath);
@@ -1984,6 +2420,9 @@ index 00000000..0f9c90e3
 +        .pipe(Effect.timeout("60 seconds"));
 +      yield* client.raw.notify("initialized");
 +      const synchronize = Effect.gen(function* () {
++        const registered = registrationDirectory
++          ? yield* Effect.tryPromise(() => sharedRegistrationTimes(registrationDirectory))
++          : new Map<string, number>();
 +        const disabled = new Set(
 +          registrationDirectory
 +            ? yield* Effect.tryPromise(() => unsharedThreads(registrationDirectory))
@@ -2003,6 +2442,7 @@ index 00000000..0f9c90e3
 +              disabled.has(cursor.threadId)
 +            ) {
 +              yield* providers.stopSession({ threadId: binding.threadId });
++              yield* decision(cursor.threadId, "detached_explicitly");
 +            }
 +          }
 +        }
@@ -2015,6 +2455,10 @@ index 00000000..0f9c90e3
 +          for (const id of page.data) loaded.add(id);
 +          cursor = page.nextCursor;
 +        } while (cursor);
++        counts = { registered: registered.size, loaded: loaded.size, attached: 0, disabled: disabled.size };
++        for (const id of decisions.keys()) {
++          if (!registered.has(id) && !disabled.has(id) && !loaded.has(id)) decisions.delete(id);
++        }
 +        const candidates: Array<typeof NativeThread.Type> = [];
 +        if (roots.length)
 +          do {
@@ -2043,11 +2487,9 @@ index 00000000..0f9c90e3
 +            cursor = page.nextCursor;
 +          } while (cursor);
 +        if (registrationDirectory) {
-+          const registered = yield* Effect.tryPromise(() =>
-+            registeredSharedThreads(registrationDirectory),
-+          );
-+          for (const id of registered) {
-+            if (!loaded.has(id) || candidates.some((candidate) => candidate.id === id)) continue;
++          for (const id of registered.keys()) {
++            if (!loaded.has(id)) { yield* decision(id, "registered_but_not_loaded"); continue; }
++            if (candidates.some((candidate) => candidate.id === id)) continue;
 +            yield* client.raw.request("thread/read", { threadId: id, includeTurns: false }).pipe(
 +              sharedDiscoveryDeadline,
 +              Effect.flatMap(decodeThread),
@@ -2072,8 +2514,13 @@ index 00000000..0f9c90e3
 +        );
 +        const bindings = yield* directory.listBindings();
 +        const sessions = yield* providers.listSessions();
++        for (const id of retryAfter.keys()) {
++          if (disabled.has(id) || !candidates.some((candidate) => candidate.id === id)) retryAfter.delete(id);
++        }
 +        for (const native of candidates) {
-+          if (disabled.has(native.id)) continue;
++          if (disabled.has(native.id)) { yield* decision(native.id, "sharing_disabled"); continue; }
++          const attemptAt = DateTime.toEpochMillis(yield* DateTime.now);
++          if ((retryAfter.get(native.id) ?? 0) > attemptAt) continue;
 +          yield* Effect.gen(function* () {
 +            const existingBinding = bindings.find(
 +              (binding) =>
@@ -2086,21 +2533,23 @@ index 00000000..0f9c90e3
 +            const threadId =
 +              existingBinding?.threadId ?? ThreadId.make(`shared:${environmentKey}:${native.id}`);
 +            const existing = yield* snapshots.getThreadShellById(threadId);
-+            if (Option.isSome(existing) && existing.value.archivedAt !== null) return;
++            if (Option.isSome(existing) && existing.value.archivedAt !== null) { retryAfter.delete(native.id); yield* decision(native.id, "archived"); return; }
 +            if (Option.isNone(existing)) {
 +              const saved = (yield* snapshots.getCommandReadModel()).threads.find(
 +                (thread) => thread.id === threadId,
 +              );
-+              if (saved?.deletedAt) return;
++              if (saved?.deletedAt) { retryAfter.delete(native.id); yield* decision(native.id, "deleted"); return; }
 +            }
 +            const live = sessions.find(
 +              (session) =>
 +                session.threadId === threadId &&
 +                (session.status === "ready" || session.status === "running"),
 +            );
-+            if (live && !importPending(existingBinding?.runtimePayload)) return;
-+            if (Option.isSome(existing) && !shouldAttachSharedThread(existingBinding, native))
-+              return;
++            if (live && !importPending(existingBinding?.runtimePayload)) { counts.attached++; retryAfter.delete(native.id); yield* decision(native.id, "attached"); return; }
++            if (Option.isSome(existing) && !shouldAttachSharedThread(existingBinding, native, registered.get(native.id))) {
++              yield* decision(native.id, "idle_detached_no_new_attach_request"); return;
++            }
++            yield* decision(native.id, "attaching");
 +            const now = DateTime.formatIso(yield* DateTime.now);
 +            const existingProjectId = projectIds.get(native.cwd);
 +            const projectId =
@@ -2151,10 +2600,8 @@ index 00000000..0f9c90e3
 +                historyImport: true,
 +              });
 +            }
-+            const before = yield* client.raw
-+              .request("thread/read", { threadId: native.id, includeTurns: true })
-+              .pipe(sharedDiscoveryDeadline, Effect.flatMap(decodeThread));
-+            for (const message of nativeMessages(threadId, before.thread)) {
++            const before = yield* readIsolatedSharedHistory(socketPath, native.id);
++            for (const message of nativeMessages(threadId, { ...native, turns: before.turns })) {
 +              yield* engine.dispatch({
 +                type: "thread.message.observe",
 +                commandId: yield* commandId,
@@ -2171,10 +2618,8 @@ index 00000000..0f9c90e3
 +                resumeCursor: { threadId: native.id },
 +                modelSelection: { instanceId, model: native.model ?? "unknown" },
 +              });
-+            const after = yield* client.raw
-+              .request("thread/read", { threadId: native.id, includeTurns: true })
-+              .pipe(sharedDiscoveryDeadline, Effect.flatMap(decodeThread));
-+            for (const message of nativeMessages(threadId, after.thread)) {
++            const after = yield* readIsolatedSharedHistory(socketPath, native.id);
++            for (const message of nativeMessages(threadId, { ...native, turns: after.turns })) {
 +              yield* engine.dispatch({
 +                type: "thread.message.observe",
 +                commandId: yield* commandId,
@@ -2185,32 +2630,41 @@ index 00000000..0f9c90e3
 +              threadId,
 +              provider: ProviderDriverKind.make("codex"),
 +              providerInstanceId: instanceId,
-+              runtimePayload: { sharedImportPending: false },
++              runtimePayload: { sharedImportPending: false, sharedHistoryTruncated: before.truncated || after.truncated },
++            });
++            retryAfter.delete(native.id);
++            counts.attached++;
++            yield* decision(native.id, "attached");
++            yield* Effect.logInfo("shared.history.imported", {
++              at: DateTime.formatIso(yield* DateTime.now), nativeThreadId: native.id, threadId,
++              beforeTurns: before.turns.length, afterTurns: after.turns.length,
++              truncated: before.truncated || after.truncated,
 +            });
 +          }).pipe(
-+            Effect.catch((cause) =>
-+              Effect.logWarning("Shared Codex conversation could not be synchronized", {
-+                nativeThreadId: native.id,
-+                cause,
-+              }),
-+            ),
++            Effect.catch((cause) => Effect.gen(function* () {
++              retryAfter.set(native.id, DateTime.toEpochMillis(yield* DateTime.now) + 60_000);
++              yield* decision(native.id, "attach_failed_retry_scheduled");
++              yield* Effect.logWarning("Shared Codex conversation synchronization failed; retry deferred 60 seconds", { nativeThreadId: native.id, error: cause._tag });
++            })),
 +          );
 +        }
++        yield* report(retryAfter.size ? "degraded" : "healthy");
 +      });
 +      yield* synchronize.pipe(Effect.repeat(Schedule.spaced("2 seconds")));
 +    }),
 +  );
 +  yield* connection.pipe(
-+    Effect.catch((cause) =>
-+      Effect.logWarning("Shared Codex discovery disconnected; retrying", { cause }),
-+    ),
++    Effect.catch((cause) => Effect.gen(function* () {
++      yield* report("disconnected");
++      yield* Effect.logWarning("Shared Codex discovery disconnected; retrying", { error: cause._tag });
++    })),
 +    Effect.repeat(Schedule.spaced("5 seconds")),
 +    Effect.forkScoped,
 +  );
 +});
 diff --git a/apps/server/src/provider/sharedCodex.ts b/apps/server/src/provider/sharedCodex.ts
 new file mode 100644
-index 00000000..d5b74851
+index 000000000..d5b748513
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodex.ts
 @@ -0,0 +1,3 @@
@@ -2219,7 +2673,7 @@ index 00000000..d5b74851
 +}
 diff --git a/apps/server/src/provider/sharedCodexBenchmark.test.ts b/apps/server/src/provider/sharedCodexBenchmark.test.ts
 new file mode 100644
-index 00000000..3d452875
+index 000000000..3d4528753
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexBenchmark.test.ts
 @@ -0,0 +1,63 @@
@@ -2288,7 +2742,7 @@ index 00000000..3d452875
 +});
 diff --git a/apps/server/src/provider/sharedCodexBenchmark.ts b/apps/server/src/provider/sharedCodexBenchmark.ts
 new file mode 100644
-index 00000000..47f2daec
+index 000000000..47f2daec4
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexBenchmark.ts
 @@ -0,0 +1,91 @@
@@ -2383,9 +2837,107 @@ index 00000000..47f2daec
 +  });
 +  process.stdout.write(JSON.stringify(result, null, 2) + "\n");
 +}
+diff --git a/apps/server/src/provider/sharedCodexHistory.test.ts b/apps/server/src/provider/sharedCodexHistory.test.ts
+new file mode 100644
+index 000000000..506553c1c
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexHistory.test.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, it } from "vite-plus/test";
++import * as Effect from "effect/Effect";
++import { readRecentSharedTurns } from "./sharedCodexHistory.ts";
++
++describe("bounded shared history", () => {
++  it("never requests full histories and bounds an endless history to 50 summary turns", async () => {
++    let calls = 0;
++    const history = await Effect.runPromise(readRecentSharedTurns((method, params) => {
++      expect(method).toBe("thread/turns/list");
++      expect(params.itemsView).toBe("summary");
++      expect(params.limit).toBe(10);
++      calls++;
++      return Effect.succeed({ data: Array.from({ length: 10 }, (_, i) => ({ id: `${calls}-${i}`, status: "completed", items: [] })), nextCursor: `${calls}` });
++    }, "synthetic"));
++    expect(calls).toBe(5);
++    expect(history.turns).toHaveLength(50);
++    expect(history.truncated).toBe(true);
++  });
++  it("finds active turns without loading any items", async () => {
++    const history = await Effect.runPromise(readRecentSharedTurns((_, params) => {
++      expect(params.itemsView).toBe("notLoaded");
++      return Effect.succeed({ data: [{ id: "active", status: "inProgress", items: [] }], nextCursor: null });
++    }, "synthetic", "notLoaded"));
++    expect(history.turns[0]?.id).toBe("active");
++  });
++  it("fails on a repeated cursor instead of looping", async () => {
++    await expect(Effect.runPromise(readRecentSharedTurns(() => Effect.succeed({ data: [], nextCursor: "same" }), "synthetic"))).rejects.toThrow("cursor repeated");
++  });
++  it("rejects a server that ignores the page bound", async () => {
++    await expect(Effect.runPromise(readRecentSharedTurns(() => Effect.succeed({ data: Array.from({length: 11}, () => ({id:"x",status:"completed",items:[]})) }), "synthetic"))).rejects.toThrow("page size");
++  });
++});
+diff --git a/apps/server/src/provider/sharedCodexHistory.ts b/apps/server/src/provider/sharedCodexHistory.ts
+new file mode 100644
+index 000000000..e661cf924
+--- /dev/null
++++ b/apps/server/src/provider/sharedCodexHistory.ts
+@@ -0,0 +1,54 @@
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++import * as Schema from "effect/Schema";
++import * as CodexClient from "effect-codex-app-server/client";
++import * as CodexErrors from "effect-codex-app-server/errors";
++import { makeSharedCodexTransport } from "./Layers/codexSharedTransport.ts";
++
++class SharedHistoryError extends Schema.TaggedErrorClass<SharedHistoryError>()("SharedHistoryError", { message: Schema.String }) {}
++
++const Turn = Schema.Struct({
++  id: Schema.String,
++  status: Schema.String,
++  startedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
++  items: Schema.Array(Schema.Unknown),
++});
++const Page = Schema.Struct({
++  data: Schema.Array(Turn),
++  nextCursor: Schema.optionalKey(Schema.NullOr(Schema.String)),
++});
++type Request = (method: string, params: Record<string, unknown>) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
++
++export const readRecentSharedTurns = Effect.fn("readRecentSharedTurns")(function* (
++  request: Request, threadId: string, itemsView: "summary" | "notLoaded" = "summary",
++) {
++  const turns: Array<typeof Turn.Type> = [];
++  const cursors = new Set<string>();
++  let cursor: string | null = null;
++  // Recent history is a bounded reconciliation window, not a full transcript export.
++  for (let pageNumber = 0; pageNumber < (itemsView === "notLoaded" ? 1 : 5); pageNumber++) {
++    const page: typeof Page.Type = yield* request("thread/turns/list", {
++      threadId, cursor, limit: 10, sortDirection: "desc", itemsView,
++    }).pipe(Effect.timeout("10 seconds"), Effect.flatMap(Schema.decodeUnknownEffect(Page)));
++    if (page.data.length > 10) return yield* new SharedHistoryError({ message: "Native history exceeded requested page size" });
++    turns.push(...page.data);
++    cursor = page.nextCursor ?? null;
++    if (!cursor) break;
++    if (cursors.has(cursor)) return yield* new SharedHistoryError({ message: "Native history cursor repeated" });
++    cursors.add(cursor);
++  }
++  return { turns: turns.reverse(), truncated: cursor !== null };
++});
++
++export const readIsolatedSharedHistory = Effect.fn("readIsolatedSharedHistory")(
++  function* (socketPath: string, threadId: string) {
++    return yield* Effect.scoped(Effect.gen(function* () {
++      const transport = yield* makeSharedCodexTransport(socketPath);
++      const context = yield* Layer.build(CodexClient.layerStdio(transport.stdio, {}, transport.terminationError));
++      const client = yield* CodexClient.CodexAppServerClient.pipe(Effect.provide(context));
++      yield* client.raw.request("initialize", { clientInfo: { name: "t3_history", version: "1" }, capabilities: { experimentalApi: true } });
++      yield* client.raw.notify("initialized");
++      return yield* readRecentSharedTurns(client.raw.request, threadId);
++    })).pipe(Effect.timeout("20 seconds"));
++  },
++);
 diff --git a/apps/server/src/provider/sharedCodexLaunch.test.ts b/apps/server/src/provider/sharedCodexLaunch.test.ts
 new file mode 100644
-index 00000000..6feba627
+index 000000000..6feba6272
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexLaunch.test.ts
 @@ -0,0 +1,30 @@
@@ -2421,7 +2973,7 @@ index 00000000..6feba627
 +});
 diff --git a/apps/server/src/provider/sharedCodexLaunch.ts b/apps/server/src/provider/sharedCodexLaunch.ts
 new file mode 100644
-index 00000000..88caa1ee
+index 000000000..88caa1ee3
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexLaunch.ts
 @@ -0,0 +1,78 @@
@@ -2505,7 +3057,7 @@ index 00000000..88caa1ee
 +}
 diff --git a/apps/server/src/provider/sharedCodexRegistration.test.ts b/apps/server/src/provider/sharedCodexRegistration.test.ts
 new file mode 100644
-index 00000000..1739ded8
+index 000000000..1739ded8f
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexRegistration.test.ts
 @@ -0,0 +1,51 @@
@@ -2562,10 +3114,10 @@ index 00000000..1739ded8
 +});
 diff --git a/apps/server/src/provider/sharedCodexRegistration.ts b/apps/server/src/provider/sharedCodexRegistration.ts
 new file mode 100644
-index 00000000..bb07a3e8
+index 000000000..c756b9db2
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexRegistration.ts
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,54 @@
 +// @effect-diagnostics nodeBuiltinImport:off - Local launcher registration boundary.
 +import * as NodeFSP from "node:fs/promises";
 +import * as NodePath from "node:path";
@@ -2589,6 +3141,20 @@ index 00000000..bb07a3e8
 +  });
 +}
 +
++export async function sharedRegistrationTimes(directory: string): Promise<Map<string, number>> {
++  const ids = await registeredSharedThreads(directory);
++  const entries = await Promise.all(ids.map(async (id) => {
++    try {
++      const stat = await NodeFSP.stat(NodePath.join(directory, id + ".thread"));
++      return [id, stat.mtimeMs] as const;
++    } catch (error) {
++      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [id, 0] as const;
++      throw error;
++    }
++  }));
++  return new Map(entries);
++}
++
 +export async function unshareThread(directory: string, threadId: string) {
 +  if (!NodePath.isAbsolute(directory))
 +    throw new Error("Shared registration directory must be absolute");
@@ -2608,7 +3174,7 @@ index 00000000..bb07a3e8
 +}
 diff --git a/apps/server/src/provider/sharedCodexTerminalRelay.test.ts b/apps/server/src/provider/sharedCodexTerminalRelay.test.ts
 new file mode 100644
-index 00000000..5dfff790
+index 000000000..5dfff790b
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexTerminalRelay.test.ts
 @@ -0,0 +1,267 @@
@@ -2881,7 +3447,7 @@ index 00000000..5dfff790
 +});
 diff --git a/apps/server/src/provider/sharedCodexTerminalRelay.ts b/apps/server/src/provider/sharedCodexTerminalRelay.ts
 new file mode 100644
-index 00000000..f5ee62f4
+index 000000000..f5ee62f46
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexTerminalRelay.ts
 @@ -0,0 +1,120 @@
@@ -3007,7 +3573,7 @@ index 00000000..f5ee62f4
 +}
 diff --git a/apps/server/src/provider/sharedCodexTerminalState.test.ts b/apps/server/src/provider/sharedCodexTerminalState.test.ts
 new file mode 100644
-index 00000000..03e251d0
+index 000000000..03e251d06
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexTerminalState.test.ts
 @@ -0,0 +1,80 @@
@@ -3093,7 +3659,7 @@ index 00000000..03e251d0
 +});
 diff --git a/apps/server/src/provider/sharedCodexTerminalState.ts b/apps/server/src/provider/sharedCodexTerminalState.ts
 new file mode 100644
-index 00000000..48cdbe2b
+index 000000000..48cdbe2bb
 --- /dev/null
 +++ b/apps/server/src/provider/sharedCodexTerminalState.ts
 @@ -0,0 +1,122 @@
@@ -3220,7 +3786,7 @@ index 00000000..48cdbe2b
 +  };
 +}
 diff --git a/apps/server/src/serverRuntimeStartup.reconcile.test.ts b/apps/server/src/serverRuntimeStartup.reconcile.test.ts
-index 37fd210e..3e9e6fed 100644
+index 37fd210ee..3e9e6fed2 100644
 --- a/apps/server/src/serverRuntimeStartup.reconcile.test.ts
 +++ b/apps/server/src/serverRuntimeStartup.reconcile.test.ts
 @@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
@@ -3258,7 +3824,7 @@ index 37fd210e..3e9e6fed 100644
    const active = makeThread("thread-mark-active", "running", TurnId.make("turn-mark-active"));
    const archived = makeThread(
 diff --git a/apps/server/src/serverRuntimeStartup.ts b/apps/server/src/serverRuntimeStartup.ts
-index 09054392..20a804d4 100644
+index 090543925..20a804d4b 100644
 --- a/apps/server/src/serverRuntimeStartup.ts
 +++ b/apps/server/src/serverRuntimeStartup.ts
 @@ -1,3 +1,5 @@
@@ -3285,10 +3851,10 @@ index 09054392..20a804d4 100644
        Effect.annotateSpans({
 diff --git a/apps/server/src/sharedCodexTerminal.ts b/apps/server/src/sharedCodexTerminal.ts
 new file mode 100644
-index 00000000..b50edd0f
+index 000000000..362f65574
 --- /dev/null
 +++ b/apps/server/src/sharedCodexTerminal.ts
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,99 @@
 +// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off - Interactive Node launcher owns the child, diagnostic timestamps, and reporting heartbeat.
 +import * as NodeChildProcess from "node:child_process";
 +import * as NodeFS from "node:fs";
@@ -3338,6 +3904,11 @@ index 00000000..b50edd0f
 +function register(state: TerminalObservation | null) {
 +  if (!registrationDirectory || !state || registrations.has(state.nativeThreadId)) return;
 +  const id = state.nativeThreadId;
++  if (process.env.T3_CODEX_AUTO_SHARE === "0") {
++    registrations.set(id, Promise.resolve());
++    diagnostic(`Native session ready for in-session sharing: ${id}`);
++    return;
++  }
 +  registrations.set(
 +    id,
 +    registerSharedThread(registrationDirectory, id).catch((error) => {
@@ -3384,7 +3955,7 @@ index 00000000..b50edd0f
 +    );
 +}
 diff --git a/packages/contracts/src/orchestration.ts b/packages/contracts/src/orchestration.ts
-index da4eac53..d27ad260 100644
+index da4eac53d..d27ad2607 100644
 --- a/packages/contracts/src/orchestration.ts
 +++ b/packages/contracts/src/orchestration.ts
 @@ -1165,6 +1165,18 @@ const ThreadHistoryImportCommand = Schema.Struct({
@@ -3415,7 +3986,7 @@ index da4eac53..d27ad260 100644
    ThreadTurnDiffCompleteCommand,
    ThreadActivityAppendCommand,
 diff --git a/packages/contracts/src/provider.ts b/packages/contracts/src/provider.ts
-index 3f9570a3..0f4deaca 100644
+index 3f9570a30..0f4deacab 100644
 --- a/packages/contracts/src/provider.ts
 +++ b/packages/contracts/src/provider.ts
 @@ -67,6 +67,7 @@ export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
@@ -3427,7 +3998,7 @@ index 3f9570a3..0f4deaca 100644
        explicitly support promptless continuation. */
    continuation: Schema.optional(Schema.Boolean),
 diff --git a/packages/effect-codex-app-server/src/client.test.ts b/packages/effect-codex-app-server/src/client.test.ts
-index 3830c5fc..d1c476a8 100644
+index 3830c5fc5..d1c476a8d 100644
 --- a/packages/effect-codex-app-server/src/client.test.ts
 +++ b/packages/effect-codex-app-server/src/client.test.ts
 @@ -32,6 +32,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
@@ -3458,7 +4029,7 @@ index 3830c5fc..d1c476a8 100644
          {
            itemId: "item-approval-1",
 diff --git a/packages/effect-codex-app-server/src/client.ts b/packages/effect-codex-app-server/src/client.ts
-index 78d71962..c927be19 100644
+index 78d719626..c927be19c 100644
 --- a/packages/effect-codex-app-server/src/client.ts
 +++ b/packages/effect-codex-app-server/src/client.ts
 @@ -51,6 +51,7 @@ export class CodexAppServerClient extends Context.Service<
@@ -3507,7 +4078,7 @@ index 78d71962..c927be19 100644
    "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
  )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
 diff --git a/packages/effect-codex-app-server/src/errors.ts b/packages/effect-codex-app-server/src/errors.ts
-index f0bf470c..39e76127 100644
+index f0bf470c2..39e761277 100644
 --- a/packages/effect-codex-app-server/src/errors.ts
 +++ b/packages/effect-codex-app-server/src/errors.ts
 @@ -108,6 +108,8 @@ export const CodexAppServerProtocolParseOperation = Schema.Literals([

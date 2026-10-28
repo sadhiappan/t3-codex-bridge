@@ -7,6 +7,7 @@ cd "$ROOT/.runtime/t3/apps/server"
   src/provider/sharedCodexRegistration.test.ts \
   src/provider/sharedCodexTerminalRelay.test.ts \
   src/provider/sharedCodexTerminalState.test.ts \
+  src/provider/sharedCodexHistory.test.ts \
   src/provider/SharedCodexDiscovery.test.ts \
   src/provider/Layers/codexSharedTransport.test.ts \
   src/provider/Layers/CodexSessionRuntime.test.ts \
